@@ -3087,6 +3087,78 @@ function dealStartingRemedies(){
     };
   }
 })();</script>
+
+<script>
+/* NAMNET ONLINE — correctif final des tours et de la synchronisation des actions */
+(function(){
+  function normalizeOnlineLocalState(){
+    if(typeof onlineStarted==='undefined'||!onlineStarted||typeof onlineUid==='undefined') return;
+    if(state.mode!=='online'||!Array.isArray(state.players)||!state.players.length) return;
+    const me=state.players.findIndex(p=>p&&p.uid===onlineUid);
+    if(me<0)return;
+
+    /* Keep the local player at index 0, because all existing game actions
+       intentionally operate on state.players[0]. Preserve the real active
+       player's canonical onlineIndex while rotating the local view. */
+    const activeCanonical=Number.isInteger(state.active)
+      ? Number(state.players[state.active]?.onlineIndex ?? state.active)
+      : 0;
+    if(me!==0){
+      const old=state.players.slice();
+      state.players=old.slice(me).concat(old.slice(0,me));
+      if(Array.isArray(state.zoneByPlayer)){
+        state.zoneByPlayer=state.zoneByPlayer.slice(me).concat(state.zoneByPlayer.slice(0,me));
+      }
+      const localByCanonical={};
+      state.players.forEach((pl,i)=>{if(Number.isInteger(pl?.onlineIndex))localByCanonical[pl.onlineIndex]=i;});
+      const remap=v=>Number.isInteger(v)&&localByCanonical[v]!==undefined?localByCanonical[v]:v;
+      state.active=remap(activeCanonical);
+      const fix=x=>{if(x&&Number.isInteger(x.foundBy))x.foundBy=remap(x.foundBy);return x};
+      state.players.forEach(pl=>['hand','dried','discovered','carrying','created','remedyTokens'].forEach(k=>{if(Array.isArray(pl[k]))pl[k]=pl[k].map(fix)}));
+      if(state.zoneDiscoveries)Object.keys(state.zoneDiscoveries).forEach(z=>state.zoneDiscoveries[z]=(state.zoneDiscoveries[z]||[]).map(fix));
+      if(state.responseWindow){state.responseWindow.sourceIndex=remap(state.responseWindow.sourceIndex);state.responseWindow.targetIndex=remap(state.responseWindow.targetIndex);}
+      if(state.arcaneWindow&&Number.isInteger(state.arcaneWindow.explorer))state.arcaneWindow.explorer=remap(state.arcaneWindow.explorer);
+      if(state.marketDay){
+        if(Number.isInteger(state.marketDay.source))state.marketDay.source=remap(state.marketDay.source);
+        if(Array.isArray(state.marketDay.participants))state.marketDay.participants=state.marketDay.participants.map(remap);
+      }
+    }else{
+      const localByCanonical={};
+      state.players.forEach((pl,i)=>{if(Number.isInteger(pl?.onlineIndex))localByCanonical[pl.onlineIndex]=i;});
+      state.active=localByCanonical[activeCanonical]??state.active;
+    }
+  }
+  window.normalizeOnlineLocalState=normalizeOnlineLocalState;
+
+  /* Inline onclick handlers run after capture listeners. Normalize first so
+     every existing action (discover, remedies, market, cards, etc.) uses the
+     current online player's local slot without rewriting the game mechanics. */
+  document.addEventListener('click',function(e){
+    if(state.mode==='online'&&onlineStarted)normalizeOnlineLocalState();
+  },true);
+
+  /* The final renderGame definition in the game code replaced the earlier
+     online wrapper. Restore synchronization here, after every visual render. */
+  const finalRenderGame=window.renderGame;
+  if(typeof finalRenderGame==='function'){
+    window.renderGame=function(){
+      const r=finalRenderGame.apply(this,arguments);
+      if(typeof scheduleOnlineSync==='function')scheduleOnlineSync();
+      return r;
+    };
+  }
+
+  /* Normalize once after each remote snapshot as well. */
+  const finalApplyRemote=window.applyRemoteState;
+  if(typeof finalApplyRemote==='function'){
+    window.applyRemoteState=function(raw){
+      const r=finalApplyRemote.apply(this,arguments);
+      if(typeof normalizeOnlineLocalState==='function')normalizeOnlineLocalState();
+      return r;
+    };
+  }
+})();
+</script>
 </body></html>
 <style id="v4-final-fixes">
 .zone-mont .zone-symptoms{left:8%!important;right:auto!important;top:12px!important;bottom:auto!important}
