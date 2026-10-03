@@ -2851,27 +2851,27 @@ function dealStartingRemedies(){
     roomRef.on('value',snap=>{
       const room=snap.val();
       if(!room){
-        /* A guest must NEVER be sent back to the setup screen because of a
-           temporary/disconnected room snapshot. Once a game has started, keep
-           the game screen and wait for Firebase to reconnect. */
-        if(onlineStarted || sessionStorage.getItem('namnetOnlineStarted')==='1'){
-          onlineStarted=true;
+        /* Do not send a connected player back to the setup screen because of a
+           transient Firebase snapshot. Keep the current game visible if already started. */
+        if(onlineStarted){
           document.getElementById('setup')?.classList.add('hidden');
           document.getElementById('game')?.classList.remove('hidden');
           return;
         }
-        toast('La salle n’existe plus.');closeModal();return;
+        toast('La salle n’existe plus.');closeModal();return
       }
+      /* Once Firebase says the room is started, NEVER rebuild the lobby on this device.
+         The old condition required room.state to be present in the same snapshot; on a
+         guest device that could briefly be false and the guest was sent back to the menu. */
       if(room.started){
-        /* Mark the transition immediately, even if the state arrives one
-           Firebase tick later. This prevents the guest from falling back to
-           the setup/menu between the two writes. */
         onlineStarted=true;
-        try{sessionStorage.setItem('namnetOnlineStarted','1')}catch(e){}
         closeModal();
         document.getElementById('setup')?.classList.add('hidden');
         document.getElementById('game')?.classList.remove('hidden');
-        if(room.state){applyRemoteState(room.state);}
+        if(room.state){
+          try{ applyRemoteState(room.state); }
+          catch(e){ console.error('NAMNET online start',e); }
+        }
         return;
       }
       modalBox(lobbyHtml(room));
@@ -2914,7 +2914,6 @@ function dealStartingRemedies(){
     state.zoneByPlayer=players.map(p=>p.zone);state.onlineRoom=roomCode;state.onlineHost=true;
     state.onlinePlayers=players.map(p=>({uid:p.uid,onlineIndex:p.onlineIndex}));
     onlineStarted=true;
-    try{sessionStorage.setItem('namnetOnlineStarted','1')}catch(e){}
     /* Build the complete starting state locally first. */
     dealStartingRemedies();
     state.players.forEach((p,i)=>{p.uid=players[i].uid;p.onlineIndex=players[i].onlineIndex});
@@ -3007,7 +3006,7 @@ function dealStartingRemedies(){
       }));
     }catch(e){}
   }
-  function forgetOnlineRoom(){try{sessionStorage.removeItem('namnetOnlineRoom');sessionStorage.removeItem('namnetOnlineStarted')}catch(e){}}
+  function forgetOnlineRoom(){try{sessionStorage.removeItem('namnetOnlineRoom')}catch(e){}}
   const _oldCreateOnlineRoom=window.createOnlineRoom;
   window.createOnlineRoom=async function(){const r=await _oldCreateOnlineRoom.apply(this,arguments);rememberOnlineRoom();return r};
   const _oldJoinOnlineRoom=window.joinOnlineRoom;
