@@ -2981,7 +2981,10 @@ function dealStartingRemedies(){
     if(out.responseWindow){out.responseWindow.sourceIndex=canonicalToLocal[out.responseWindow.sourceIndex]??out.responseWindow.sourceIndex;out.responseWindow.targetIndex=canonicalToLocal[out.responseWindow.targetIndex]??out.responseWindow.targetIndex;delete out.responseWindow.applyFn;}
     if(out.arcaneWindow&&Number.isInteger(out.arcaneWindow.explorer))out.arcaneWindow.explorer=canonicalToLocal[out.arcaneWindow.explorer]??out.arcaneWindow.explorer;
     Object.keys(out).forEach(k=>state[k]=out[k]);state.mode='online';state.onlineActiveUid=out.onlineActiveUid||state.players[state.active]?.uid||null;
-    renderGame();onlineApplying=false;
+    /* Keep the remote snapshot authoritative through the render. The render wrapper
+       must NOT immediately publish this freshly received snapshot back to Firebase. */
+    renderGame();
+    onlineApplying=false;
   }
   let syncTimer=null;
   async function writeOnlineState(){
@@ -3085,7 +3088,7 @@ function dealStartingRemedies(){
     };
   }
 })();</script>
-<script id="namnet-online-final-bridge">(function(){function turn(){if(state.mode!=="online")return true;const me=state.players?.[0],u=state.onlineActiveUid||state.players?.[state.active]?.uid||null;if(!me||me.uid!==u){toast("Ce n'est pas votre tour.");return false}state.active=0;return Number(state.actions||0)>0}function view(){if(state.mode!=="online")return true;return !!state.players?.[0]}const O={};["discoverPlant","confirmDiscover","dryPlant","buyMarket","takeMarketCard","finishMarketBuy","buyMaterial","buyTonicToken","sellCards","finishSell","playSpecialCard","playEphemeralCard","drawNewRemedy","chooseNewRemedyType","takeNewRemedy","confirmRemedyCreation","selectRemedyForCreation","healLast","healWithPlants","useTonic","takeTonicCard"].forEach(n=>{if(typeof window[n]==="function")O[n]=window[n]});["discoverPlant","confirmDiscover","dryPlant","buyMarket","takeMarketCard","finishMarketBuy","buyMaterial","buyTonicToken","sellCards","finishSell","playSpecialCard","playEphemeralCard","drawNewRemedy","chooseNewRemedyType","takeNewRemedy","confirmRemedyCreation","healLast","healWithPlants","useTonic","takeTonicCard"].forEach(n=>{if(O[n])window[n]=function(){if(state.mode==="online"&&!turn())return;return O[n].apply(this,arguments)}});if(O.openRemedies)window.openRemedies=function(){if(state.mode==="online"&&!view())return;return O.openRemedies.apply(this,arguments)};const localEnd=window.endTurn;window.endTurn=function(){if(state.mode!=="online")return localEnd.apply(this,arguments);if(state.gameOver)return;const me=state.players?.[0],u=state.onlineActiveUid||state.players?.[state.active]?.uid||null;if(!me||me.uid!==u){toast("Ce n'est pas votre tour.");return}if(checkEndPending()){endGame();return}const c=serializeStateCanonical(),ps=c.players||[],i=ps.findIndex(p=>p.uid===me.uid),next=ps[(i+1)%ps.length];state.onlineActiveUid=next?.uid||null;state.active=state.players.findIndex(p=>p.uid===state.onlineActiveUid);if(state.active<0)state.active=0;if(state.active===0)state.day++;startTurn(state.active);clearTimeout(syncTimer);syncTimer=setTimeout(writeOnlineState,80)}})();</script></body></html>
+</body></html>
 <style id="v4-final-fixes">
 .zone-mont .zone-symptoms{left:8%!important;right:auto!important;top:12px!important;bottom:auto!important}
 .zone-hum .zone-symptoms{left:8%!important;right:auto!important;top:12px!important;bottom:auto!important}
@@ -3630,6 +3633,86 @@ function dealStartingRemedies(){
 
   /* Final normalization once the page is ready, without changing the visual layout. */
   window.addEventListener('load',()=>{try{canonicalizeAll()}catch(e){}},{once:true});
+})();
+</script>
+<script id="namnet-v30-online-final-adapter">
+(function(){
+  function onlineTurn(){
+    if(state.mode!=='online') return true;
+    const me=state.players&&state.players[0];
+    const uid=state.onlineActiveUid || (state.players&&state.players[state.active]&&state.players[state.active].uid);
+    if(!me || !uid || me.uid!==uid){ toast("Ce n'est pas votre tour."); return false; }
+    state.active=0;
+    return Number(state.actions||0)>0;
+  }
+  function onlinePublish(){ try{ scheduleOnlineSync(); }catch(e){} }
+
+  /* In online mode the local player is always slot 0. These adapters only change
+     that local index; local/AI mode is untouched. */
+  const d=window.discoverPlant;
+  if(d) window.discoverPlant=function(){ if(!onlineTurn())return; return d.apply(this,arguments); };
+  const c=window.confirmDiscover;
+  if(c) window.confirmDiscover=function(){ if(state.mode==='online'&&!onlineTurn())return; const r=c.apply(this,arguments); onlinePublish(); return r; };
+
+  const om=window.openMarketBuy;
+  if(om) window.openMarketBuy=function(){ if(state.mode==='online'&&!onlineTurn())return; return om.apply(this,arguments); };
+  const tm=window.takeMarketCard;
+  if(tm) window.takeMarketCard=function(i){
+    if(state.mode!=='online')return tm.apply(this,arguments);
+    if(!onlineTurn())return;
+    const p=state.players[0],x=state.market?.[i];
+    if(!x){toast('Carte indisponible.');return;}
+    if(Number(p.deniers||0)<1){toast('Il vous faut 1 denier.');return;}
+    p.deniers--;p.hand.push(x);state.market[i]=state.deck.length?state.deck.pop():null;
+    if(!state.deck.length)state.deckEmpty=true;
+    state.marketBought=true;
+    /* Keep the purchase window open: buying several cards remains ONE action. */
+    om();
+    onlinePublish();
+  };
+  const fm=window.finishMarketBuy;
+  if(fm) window.finishMarketBuy=function(){
+    if(state.mode!=='online')return fm.apply(this,arguments);
+    if(!onlineTurn())return;
+    state.actions--;state.marketBought=false;closeModal();renderGame();afterAction();
+  };
+
+  const or=window.openRemedies;
+  if(or) window.openRemedies=function(){
+    if(state.mode==='online'&&!onlineTurn())return;
+    /* Consultation itself does not consume an action; keep the original rules. */
+    state.active=0; return or.apply(this,arguments);
+  };
+
+  const nr=window.drawNewRemedy;
+  if(nr) window.drawNewRemedy=function(){if(state.mode==='online'&&!onlineTurn())return;return nr.apply(this,arguments);};
+  const tr=window.takeNewRemedy;
+  if(tr) window.takeNewRemedy=function(){if(state.mode==='online'&&!onlineTurn())return;return tr.apply(this,arguments);};
+
+  const ps=window.playSpecialCard;
+  if(ps) window.playSpecialCard=function(i){if(state.mode==='online'&&!onlineTurn())return;return ps.apply(this,arguments);};
+  const pe=window.playEphemeralCard;
+  if(pe) window.playEphemeralCard=function(i){if(state.mode==='online'&&!onlineTurn())return;return pe.apply(this,arguments);};
+  const pt=window.playTransactionCard;
+  if(pt) window.playTransactionCard=function(i){if(state.mode==='online'&&!onlineTurn())return;return pt.apply(this,arguments);};
+
+  const bs=window.buyMaterial;
+  if(bs) window.buyMaterial=function(){if(state.mode==='online'&&!onlineTurn())return;return bs.apply(this,arguments);};
+  const bt=window.buyTonicToken;
+  if(bt) window.buyTonicToken=function(){if(state.mode==='online'&&!onlineTurn())return;return bt.apply(this,arguments);};
+
+  const sell=window.sellCards;
+  if(sell) window.sellCards=function(){if(state.mode==='online'&&!onlineTurn())return;sell.apply(this,arguments);};
+  const fs=window.finishSell;
+  if(fs) window.finishSell=function(){if(state.mode==='online'&&!onlineTurn())return;return fs.apply(this,arguments);};
+
+  const ot=window.endTurn;
+  if(ot) window.endTurn=function(){
+    if(state.mode!=='online')return ot.apply(this,arguments);
+    if(!onlineTurn())return;
+    /* ot is the already-installed online endTurn wrapper. */
+    return ot.apply(this,arguments);
+  };
 })();
 </script>
 
