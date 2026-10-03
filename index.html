@@ -3002,14 +3002,14 @@ function dealStartingRemedies(){
   }
   let syncTimer=null;
   async function writeOnlineState(){
-    /* Only the host publishes the authoritative shared state.
-       Guests render the host state and never overwrite it with their local rotated view. */
-    if(!roomRef||!onlineStarted||!onlineHost||onlineApplying)return;
+    /* Each player publishes their current shared state. The state is converted
+       back to canonical player order before being written to Firebase. */
+    if(!roomRef||!onlineStarted||onlineApplying)return;
     try{await roomRef.update({state:serializeStateCanonical()});}
     catch(e){console.error(e);toast('Synchronisation Firebase impossible.')}
   }
   function scheduleOnlineSync(){
-    if(state.mode!=='online'||!onlineStarted||onlineApplying||!onlineHost||!roomRef)return;
+    if(state.mode!=='online'||!onlineStarted||onlineApplying||!roomRef)return;
     clearTimeout(syncTimer);syncTimer=setTimeout(writeOnlineState,100);
   }
   const oldRender=window.renderGame;
