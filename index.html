@@ -2813,7 +2813,14 @@ function dealStartingRemedies(){
     }catch(e){console.error(e);toast('Firebase n’est pas disponible.');return false}
   }
   function modalBox(html){const m=document.getElementById('modal');if(!m)return; m.innerHTML='<button class="modal-close" onclick="closeModal()">Fermer</button>'+html;m.classList.add('show');}
+  function forceOnlineGameView(){
+    const setup=document.getElementById('setup'),game=document.getElementById('game');
+    if(setup)setup.classList.add('hidden');
+    if(game)game.classList.remove('hidden');
+  }
   function modeScreen(){
+    /* Never let the generic startup screen reopen after an online room has started. */
+    if(onlineStarted || (state.mode==='online' && roomRef))return;
     const setup=document.getElementById('setup');if(!setup)return;
     const card=setup.querySelector('.setup-card');if(!card)return;
     let s=document.getElementById('s0');
@@ -2848,33 +2855,46 @@ function dealStartingRemedies(){
   function listenRoom(){
     if(!roomRef)return;
     roomRef.off();
+    const stateRef=roomRef.child('state');
+    stateRef.off();
+    let stateListening=false;
+
+    const enterOnlineGame=()=>{
+      onlineStarted=true;
+      forceOnlineGameView();
+      closeModal();
+      if(stateListening)return;
+      stateListening=true;
+      stateRef.on('value',stateSnap=>{
+        const raw=stateSnap.val();
+        if(!raw)return;
+        try{applyRemoteState(raw);}
+        catch(e){console.error('NAMNET online state',e);forceOnlineGameView();}
+      },err=>{console.error('NAMNET online state listener',err);forceOnlineGameView();});
+    };
+
+    /* Small lobby listener: before the game starts we only need players/zones.
+       Once started, the large game state is listened to separately. */
     roomRef.on('value',snap=>{
       const room=snap.val();
       if(!room){
-        /* Do not send a connected player back to the setup screen because of a
-           transient Firebase snapshot. Keep the current game visible if already started. */
-        if(onlineStarted){
-          document.getElementById('setup')?.classList.add('hidden');
-          document.getElementById('game')?.classList.remove('hidden');
-          return;
-        }
-        toast('La salle n’existe plus.');closeModal();return
+        if(onlineStarted){forceOnlineGameView();return;}
+        toast('La salle n’existe plus.');closeModal();return;
       }
-      /* Once Firebase says the room is started, NEVER rebuild the lobby on this device.
-         The old condition required room.state to be present in the same snapshot; on a
-         guest device that could briefly be false and the guest was sent back to the menu. */
       if(room.started){
-        onlineStarted=true;
-        closeModal();
-        document.getElementById('setup')?.classList.add('hidden');
-        document.getElementById('game')?.classList.remove('hidden');
-        if(room.state){
-          try{ applyRemoteState(room.state); }
-          catch(e){ console.error('NAMNET online start',e); }
-        }
+        enterOnlineGame();
         return;
       }
-      modalBox(lobbyHtml(room));
+      if(!onlineStarted)modalBox(lobbyHtml(room));
+    },err=>{
+      console.error('NAMNET online room listener',err);
+      if(onlineStarted)forceOnlineGameView();
+    });
+
+    /* Dedicated started listener: this transition is no longer dependent on
+       receiving the whole room object containing the large game state. */
+    roomRef.child('started').on('value',snap=>{
+      if(snap.val()===true)enterOnlineGame();
     });
   }
   window.createOnlineRoom=async function(){
@@ -2968,8 +2988,7 @@ function dealStartingRemedies(){
     state.onlineRoom=roomCode;
     state.onlineHost=!!onlineHost;
     state.onlinePlayers=(raw.players||[]).map(p=>({uid:p.uid,onlineIndex:p.onlineIndex}));
-    document.getElementById('setup')?.classList.add('hidden');
-    document.getElementById('game')?.classList.remove('hidden');
+    forceOnlineGameView();
     const c=rehydrateState(JSON.parse(JSON.stringify(raw)));const ps=(c.players||[]).map((p,i)=>({p,i,oi:Number.isInteger(p.onlineIndex)?p.onlineIndex:i})).sort((a,b)=>a.oi-b.oi);const me=ps.findIndex(o=>o.p.uid===onlineUid);const rotate=me<0?0:me;const canonicalToLocal=[];ps.forEach((o,ci)=>{canonicalToLocal[ci]=(ci-rotate+ps.length)%ps.length});
     const arr=ps.map(o=>o.p).slice(rotate).concat(ps.map(o=>o.p).slice(0,rotate));arr.forEach((p,i)=>p.onlineIndex=p.onlineIndex??i);
     const out=c;out.players=arr;out.active=canonicalToLocal[Number(c.active)||0]??0;if(Array.isArray(out.zoneByPlayer))out.zoneByPlayer=ps.map(o=>o.p.zone).slice(rotate).concat(ps.map(o=>o.p.zone).slice(0,rotate));
