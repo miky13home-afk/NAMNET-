@@ -2936,7 +2936,12 @@ function dealStartingRemedies(){
     return c;
   }
   function applyRemoteState(raw){
-    if(!raw)return;onlineApplying=true;const c=rehydrateState(JSON.parse(JSON.stringify(raw)));const ps=(c.players||[]).map((p,i)=>({p,i,oi:Number.isInteger(p.onlineIndex)?p.onlineIndex:i})).sort((a,b)=>a.oi-b.oi);const me=ps.findIndex(o=>o.p.uid===onlineUid);const rotate=me<0?0:me;const canonicalToLocal=[];ps.forEach((o,ci)=>{canonicalToLocal[ci]=(ci-rotate+ps.length)%ps.length});
+    if(!raw)return;
+    onlineApplying=true;
+    /* Remote players must leave the setup/menu and enter the actual game when the host starts. */
+    document.getElementById('setup')?.classList.add('hidden');
+    document.getElementById('game')?.classList.remove('hidden');
+    const c=rehydrateState(JSON.parse(JSON.stringify(raw)));const ps=(c.players||[]).map((p,i)=>({p,i,oi:Number.isInteger(p.onlineIndex)?p.onlineIndex:i})).sort((a,b)=>a.oi-b.oi);const me=ps.findIndex(o=>o.p.uid===onlineUid);const rotate=me<0?0:me;const canonicalToLocal=[];ps.forEach((o,ci)=>{canonicalToLocal[ci]=(ci-rotate+ps.length)%ps.length});
     const arr=ps.map(o=>o.p).slice(rotate).concat(ps.map(o=>o.p).slice(0,rotate));arr.forEach((p,i)=>p.onlineIndex=p.onlineIndex??i);
     const out=c;out.players=arr;out.active=canonicalToLocal[Number(c.active)||0]??0;if(Array.isArray(out.zoneByPlayer))out.zoneByPlayer=ps.map(o=>o.p.zone).slice(rotate).concat(ps.map(o=>o.p.zone).slice(0,rotate));
     const fix=x=>{if(x&&Number.isInteger(x.foundBy))x.foundBy=canonicalToLocal[x.foundBy]??x.foundBy;return x};
@@ -2962,6 +2967,42 @@ function dealStartingRemedies(){
 </script>
 
 
+<script>
+/* NAMNET — corrections finales ciblées */
+(function(){
+  function canonicalArcane(card){
+    if(!card || card.type!=='Arcane naturel') return card;
+    const base=(typeof ARCANA!=='undefined'?ARCANA:[]).find(x=>x && x.name===card.name);
+    if(base && base.symptom && typeof SYM!=='undefined' && SYM[base.symptom]){
+      card.symptom=String(base.symptom).toLowerCase();
+    }else{
+      const m=String(card.name||'').match(/·\s*(digestive|wound|heart|nerve|respiratory)\s*·/i);
+      if(m)card.symptom=m[1].toLowerCase();
+    }
+    return card;
+  }
+  function normalizeArcana(){
+    (state.players||[]).forEach(p=>(p.hand||[]).forEach(canonicalArcane));
+    (state.market||[]).forEach(canonicalArcane);
+    (state.deck||[]).forEach(canonicalArcane);
+  }
+  const oldUseArcane=window.useArcane;
+  if(typeof oldUseArcane==='function'){
+    window.useArcane=function(index){
+      normalizeArcana();
+      canonicalArcane(state.players?.[0]?.hand?.[index]);
+      return oldUseArcane.apply(this,arguments);
+    };
+  }
+  const oldApplyRemote=window.applyRemoteState;
+  if(typeof oldApplyRemote==='function'){
+    window.applyRemoteState=function(raw){
+      const r=oldApplyRemote.apply(this,arguments);
+      normalizeArcana();
+      return r;
+    };
+  }
+})();</script>
 </body></html>
 <style id="v4-final-fixes">
 .zone-mont .zone-symptoms{left:8%!important;right:auto!important;top:12px!important;bottom:auto!important}
