@@ -2851,26 +2851,22 @@ function dealStartingRemedies(){
     roomRef.on('value',snap=>{
       const room=snap.val();
       if(!room){
-        if(onlineStarted)return;
-        toast('La salle n’existe plus.');closeModal();return;
-      }
-      /* IMPORTANT: once the host has started, never rebuild the lobby/menu on a guest.
-         Wait for the state if Firebase delivers the two fields in separate events. */
-      if(room.started){
-        onlineStarted=true;
-        try{sessionStorage.setItem('namnetOnlineRoom',roomCode);sessionStorage.setItem('namnetOnlineIndex',String(onlinePlayerIndex));}catch(e){}
-        closeModal();
-        if(room.state){
-          setTimeout(()=>{try{applyRemoteState(room.state);}catch(e){console.error('NAMNET online start',e);document.getElementById('setup')?.classList.add('hidden');document.getElementById('game')?.classList.remove('hidden');toast('Synchronisation de la partie…');}},0);
-        }else{
+        /* Do not send a connected player back to the setup screen because of a
+           transient Firebase snapshot. Keep the current game visible if already started. */
+        if(onlineStarted){
           document.getElementById('setup')?.classList.add('hidden');
           document.getElementById('game')?.classList.remove('hidden');
-          toast('Partie démarrée · synchronisation…');
+          return;
         }
+        toast('La salle n’existe plus.');closeModal();return
+      }
+      if(room.started && room.state){
+        closeModal();
+        if(!onlineStarted){onlineStarted=true;applyRemoteState(room.state);}
+        else applyRemoteState(room.state);
         return;
       }
-      /* Only show the lobby before the game has started. */
-      if(!onlineStarted)modalBox(lobbyHtml(room));
+      modalBox(lobbyHtml(room));
     });
   }
   window.createOnlineRoom=async function(){
@@ -2892,9 +2888,7 @@ function dealStartingRemedies(){
     const room=snap.val();if(room.started){toast('Cette partie a déjà commencé.');return}
     const players=room.players||[];if(players.some(p=>p.uid===onlineUid)){onlinePlayerIndex=players.find(p=>p.uid===onlineUid).onlineIndex}
     else {if(players.length>=room.count){toast('La salle est complète.');return}onlinePlayerIndex=players.length;players.push({uid:onlineUid,name,zone:null,onlineIndex:onlinePlayerIndex});await ref.update({players});}
-    roomCode=code;roomRef=ref;onlineHost=room.hostUid===onlineUid;onlineStarted=false;
-    try{sessionStorage.setItem('namnetOnlineRoom',roomCode);sessionStorage.setItem('namnetOnlineIndex',String(onlinePlayerIndex));}catch(e){}
-    listenRoom();
+    roomCode=code;roomRef=ref;onlineHost=room.hostUid===onlineUid;onlineStarted=false;listenRoom();
   };
   window.setOnlineZone=async function(zone){
     if(!roomRef||onlinePlayerIndex===null)return;
@@ -2904,19 +2898,23 @@ function dealStartingRemedies(){
     me.zone=zone;await roomRef.update({players});
   };
   window.startOnlineGame=async function(){
-    if(!roomRef||!onlineHost)return;const snap=await roomRef.once('value');const room=snap.val();if(!room||room.started)return;
-    const players=(room.players||[]).sort((a,b)=>a.onlineIndex-b.onlineIndex);if(players.length!==room.count||players.some(p=>!p.zone)){toast('Chaque joueur doit choisir une zone.');return}
-    state.mode='online';state.count=room.count;state.names=players.map(p=>p.name);state.zoneByPlayer=players.map(p=>p.zone);state.onlineRoom=roomCode;state.onlineHost=true;state.onlinePlayers=players.map(p=>({uid:p.uid,onlineIndex:p.onlineIndex}));
-    /* Build the complete host state first, then publish started+state atomically.
-       The old order briefly published a state while started was still false, which could
-       make another client rebuild the lobby during the transition. */
+    if(!roomRef||!onlineHost)return;
+    const snap=await roomRef.once('value');const room=snap.val();if(!room||room.started)return;
+    const players=(room.players||[]).sort((a,b)=>a.onlineIndex-b.onlineIndex);
+    if(players.length!==room.count||players.some(p=>!p.zone)){toast('Chaque joueur doit choisir une zone.');return}
+    state.mode='online';state.count=room.count;state.names=players.map(p=>p.name);
+    state.zoneByPlayer=players.map(p=>p.zone);state.onlineRoom=roomCode;state.onlineHost=true;
+    state.onlinePlayers=players.map(p=>({uid:p.uid,onlineIndex:p.onlineIndex}));
+    onlineStarted=true;
+    /* Build the complete starting state locally first. */
     dealStartingRemedies();
     state.players.forEach((p,i)=>{p.uid=players[i].uid;p.onlineIndex=players[i].onlineIndex});
-    onlineStarted=true;
-    try{sessionStorage.setItem('namnetOnlineRoom',roomCode);sessionStorage.setItem('namnetOnlineIndex','0');}catch(e){}
-    await roomRef.update({started:true,state:serializeStateCanonical()});
+    /* IMPORTANT: publish started + complete state in ONE Firebase update.
+       This prevents guests from seeing a half-started room and falling back to the lobby. */
+    const canonical=serializeStateCanonical();
+    await roomRef.update({started:true,state:canonical});
   };
-  window.leaveOnlineRoom=async function(){try{if(roomRef&&onlineHost)await roomRef.remove()}catch(e){}roomRef=null;roomCode='';onlinePlayerIndex=null;onlineHost=false;onlineStarted=false;closeModal();modeScreen();};
+  window.leaveOnlineRoom=async function(){try{if(roomRef&&onlineHost)await roomRef.remove()}catch(e){}forgetOnlineRoom();roomRef=null;roomCode='';onlinePlayerIndex=null;onlineHost=false;onlineStarted=false;closeModal();modeScreen();};
 
   function normalizeName(v){return String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();}
   function cardImage(card){
@@ -2957,7 +2955,13 @@ function dealStartingRemedies(){
   function applyRemoteState(raw){
     if(!raw)return;
     onlineApplying=true;
-    try{
+    /* A remote start is authoritative: lock this device into the online game. */
+    state.mode='online';
+    state.onlineRoom=roomCode;
+    state.onlineHost=!!onlineHost;
+    state.onlinePlayers=(raw.players||[]).map(p=>({uid:p.uid,onlineIndex:p.onlineIndex}));
+    document.getElementById('setup')?.classList.add('hidden');
+    document.getElementById('game')?.classList.remove('hidden');
     const c=rehydrateState(JSON.parse(JSON.stringify(raw)));const ps=(c.players||[]).map((p,i)=>({p,i,oi:Number.isInteger(p.onlineIndex)?p.onlineIndex:i})).sort((a,b)=>a.oi-b.oi);const me=ps.findIndex(o=>o.p.uid===onlineUid);const rotate=me<0?0:me;const canonicalToLocal=[];ps.forEach((o,ci)=>{canonicalToLocal[ci]=(ci-rotate+ps.length)%ps.length});
     const arr=ps.map(o=>o.p).slice(rotate).concat(ps.map(o=>o.p).slice(0,rotate));arr.forEach((p,i)=>p.onlineIndex=p.onlineIndex??i);
     const out=c;out.players=arr;out.active=canonicalToLocal[Number(c.active)||0]??0;if(Array.isArray(out.zoneByPlayer))out.zoneByPlayer=ps.map(o=>o.p.zone).slice(rotate).concat(ps.map(o=>o.p.zone).slice(0,rotate));
@@ -2966,34 +2970,56 @@ function dealStartingRemedies(){
     if(out.zoneDiscoveries)Object.keys(out.zoneDiscoveries).forEach(z=>out.zoneDiscoveries[z]=(out.zoneDiscoveries[z]||[]).map(fix));
     if(out.responseWindow){out.responseWindow.sourceIndex=canonicalToLocal[out.responseWindow.sourceIndex]??out.responseWindow.sourceIndex;out.responseWindow.targetIndex=canonicalToLocal[out.responseWindow.targetIndex]??out.responseWindow.targetIndex;delete out.responseWindow.applyFn;}
     if(out.arcaneWindow&&Number.isInteger(out.arcaneWindow.explorer))out.arcaneWindow.explorer=canonicalToLocal[out.arcaneWindow.explorer]??out.arcaneWindow.explorer;
-    Object.keys(out).forEach(k=>state[k]=out[k]);state.mode='online';state.started=true;
-    /* Force the game screen after the remote state has been hydrated. */
-    document.getElementById('setup')?.classList.add('hidden');
-    document.getElementById('game')?.classList.remove('hidden');
-    renderGame();
-    onlineApplying=false;
-    }catch(e){
-      onlineApplying=false;
-      console.error('NAMNET applyRemoteState',e);
-      document.getElementById('setup')?.classList.add('hidden');
-      document.getElementById('game')?.classList.remove('hidden');
-      toast('La partie est démarrée · attente de synchronisation…');
-    }
+    Object.keys(out).forEach(k=>state[k]=out[k]);state.mode='online';
+    renderGame();onlineApplying=false;
   }
   let syncTimer=null;
-  async function writeOnlineState(){if(!roomRef||!onlineStarted||onlineApplying)return;try{await roomRef.update({state:serializeStateCanonical()});}catch(e){console.error(e);toast('Synchronisation Firebase impossible.')}}
-  function scheduleOnlineSync(){if(state.mode!=='online'||!onlineStarted||onlineApplying||!roomRef)return;clearTimeout(syncTimer);syncTimer=setTimeout(writeOnlineState,100);}
+  async function writeOnlineState(){
+    /* Only the host publishes the authoritative shared state.
+       Guests render the host state and never overwrite it with their local rotated view. */
+    if(!roomRef||!onlineStarted||!onlineHost||onlineApplying)return;
+    try{await roomRef.update({state:serializeStateCanonical()});}
+    catch(e){console.error(e);toast('Synchronisation Firebase impossible.')}
+  }
+  function scheduleOnlineSync(){
+    if(state.mode!=='online'||!onlineStarted||onlineApplying||!onlineHost||!roomRef)return;
+    clearTimeout(syncTimer);syncTimer=setTimeout(writeOnlineState,100);
+  }
   const oldRender=window.renderGame;
   if(oldRender)window.renderGame=function(){const r=oldRender.apply(this,arguments);scheduleOnlineSync();return r;};
   const oldStart=window.startTurn;
   if(oldStart)window.startTurn=function(i){if(state.mode==='online'&&state.active!==0&&i!==0){return oldStart.apply(this,arguments)}return oldStart.apply(this,arguments)};
 
-  // Initial screen: add the mode selector, without changing the existing local flow.
-  window.addEventListener('load',()=>setTimeout(()=>{
-    /* Never send an online client back to the mode menu while an online session is active. */
-    if(!roomRef&&!onlineStarted&&state.mode!=='online')modeScreen();
-  },50));
-  if(!roomRef&&!onlineStarted)modeScreen();
+  /* Keep the online room across an accidental page refresh on a phone. */
+  function rememberOnlineRoom(){
+    try{
+      sessionStorage.setItem('namnetOnlineRoom',JSON.stringify({
+        code:roomCode,uid:onlineUid,index:onlinePlayerIndex,host:onlineHost
+      }));
+    }catch(e){}
+  }
+  function forgetOnlineRoom(){try{sessionStorage.removeItem('namnetOnlineRoom')}catch(e){}}
+  const _oldCreateOnlineRoom=window.createOnlineRoom;
+  window.createOnlineRoom=async function(){const r=await _oldCreateOnlineRoom.apply(this,arguments);rememberOnlineRoom();return r};
+  const _oldJoinOnlineRoom=window.joinOnlineRoom;
+  window.joinOnlineRoom=async function(){const r=await _oldJoinOnlineRoom.apply(this,arguments);rememberOnlineRoom();return r};
+
+  /* Initial screen: add the mode selector, without changing the existing local flow. */
+  window.addEventListener('load',()=>{
+    setTimeout(()=>{
+      try{
+        const saved=JSON.parse(sessionStorage.getItem('namnetOnlineRoom')||'null');
+        if(saved?.code && ensureFirebase()){
+          roomCode=saved.code;roomRef=roomPath(roomCode);
+          onlinePlayerIndex=saved.index??null;onlineHost=!!saved.host;onlineStarted=false;
+          listenRoom();
+          return;
+        }
+      }catch(e){}
+      modeScreen();
+    },50);
+  });
+  modeScreen();
 })();
 </script>
 
