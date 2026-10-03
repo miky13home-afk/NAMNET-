@@ -3567,6 +3567,67 @@ function dealStartingRemedies(){
     };
   }
 
+  /* ONLINE ACTION GATE — use the player's UID as the authority for every action.
+     The board is locally rotated so the connected player is index 0, but some legacy
+     actions still check only state.active. Normalize that index immediately before
+     the action; local/AI mode remains completely unchanged. */
+  function onlineLocalTurn(){
+    if(state.mode!=='online')return true;
+    const me=state.players?.[0];
+    const activeUid=state.onlineActiveUid||state.players?.[state.active]?.uid||null;
+    if(!me||!activeUid||me.uid!==activeUid){toast("Ce n'est pas votre tour.");return false;}
+    state.active=0;
+    return true;
+  }
+  function onlineActionReady(){
+    return onlineLocalTurn() && Number(state.actions||0)>0;
+  }
+  const _discoverOnline=window.discoverPlant;
+  if(typeof _discoverOnline==='function')window.discoverPlant=function(){
+    if(!onlineActionReady())return;
+    return _discoverOnline.apply(this,arguments);
+  };
+  const _buyMarketOnline=window.buyMarket;
+  if(typeof _buyMarketOnline==='function')window.buyMarket=function(){
+    if(!onlineActionReady())return;
+    return _buyMarketOnline.apply(this,arguments);
+  };
+  const _takeMarketCardOnline=window.takeMarketCard;
+  if(typeof _takeMarketCardOnline==='function')window.takeMarketCard=function(){
+    if(!onlineActionReady())return;
+    return _takeMarketCardOnline.apply(this,arguments);
+  };
+  const _finishMarketBuyOnline=window.finishMarketBuy;
+  if(typeof _finishMarketBuyOnline==='function')window.finishMarketBuy=function(){
+    if(state.mode==='online'&&!onlineActionReady())return;
+    return _finishMarketBuyOnline.apply(this,arguments);
+  };
+  const _buyMaterialOnline=window.buyMaterial;
+  if(typeof _buyMaterialOnline==='function')window.buyMaterial=function(){
+    if(!onlineActionReady())return;
+    return _buyMaterialOnline.apply(this,arguments);
+  };
+  const _buyTonicOnline=window.buyTonicToken;
+  if(typeof _buyTonicOnline==='function')window.buyTonicToken=function(){
+    if(!onlineActionReady())return;
+    return _buyTonicOnline.apply(this,arguments);
+  };
+  const _playSpecialOnline=window.playSpecialCard;
+  if(typeof _playSpecialOnline==='function')window.playSpecialCard=function(){
+    if(!onlineActionReady())return;
+    return _playSpecialOnline.apply(this,arguments);
+  };
+  const _playEphemeralOnline=window.playEphemeralCard;
+  if(typeof _playEphemeralOnline==='function')window.playEphemeralCard=function(){
+    if(!onlineActionReady())return;
+    return _playEphemeralOnline.apply(this,arguments);
+  };
+  const _confirmDiscoverOnline=window.confirmDiscover;
+  if(typeof _confirmDiscoverOnline==='function')window.confirmDiscover=function(){
+    if(state.mode==='online'&&!onlineActionReady())return;
+    return _confirmDiscoverOnline.apply(this,arguments);
+  };
+
   /* Final normalization once the page is ready, without changing the visual layout. */
   window.addEventListener('load',()=>{try{canonicalizeAll()}catch(e){}},{once:true});
 })();
