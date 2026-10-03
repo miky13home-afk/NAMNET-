@@ -2905,12 +2905,13 @@ function dealStartingRemedies(){
     state.mode='online';state.count=room.count;state.names=players.map(p=>p.name);
     state.zoneByPlayer=players.map(p=>p.zone);state.onlineRoom=roomCode;state.onlineHost=true;
     state.onlinePlayers=players.map(p=>({uid:p.uid,onlineIndex:p.onlineIndex}));
-    onlineStarted=true;
-    /* Build the complete starting state locally first. */
+    /* Give every player its permanent online identity BEFORE building the state. */
     dealStartingRemedies();
     state.players.forEach((p,i)=>{p.uid=players[i].uid;p.onlineIndex=players[i].onlineIndex});
-    /* IMPORTANT: publish started + complete state in ONE Firebase update.
-       This prevents guests from seeing a half-started room and falling back to the lobby. */
+    state.mode='online';
+    onlineStarted=true;
+    /* Re-render after identities are attached, then publish one authoritative state. */
+    renderGame();
     const canonical=serializeStateCanonical();
     await roomRef.update({started:true,state:canonical});
   };
@@ -2971,13 +2972,12 @@ function dealStartingRemedies(){
     if(out.responseWindow){out.responseWindow.sourceIndex=canonicalToLocal[out.responseWindow.sourceIndex]??out.responseWindow.sourceIndex;out.responseWindow.targetIndex=canonicalToLocal[out.responseWindow.targetIndex]??out.responseWindow.targetIndex;delete out.responseWindow.applyFn;}
     if(out.arcaneWindow&&Number.isInteger(out.arcaneWindow.explorer))out.arcaneWindow.explorer=canonicalToLocal[out.arcaneWindow.explorer]??out.arcaneWindow.explorer;
     Object.keys(out).forEach(k=>state[k]=out[k]);state.mode='online';
-    renderGame();onlineApplying=false;
+    try{renderGame();}finally{onlineApplying=false;}
   }
   let syncTimer=null;
   async function writeOnlineState(){
-    /* The player whose turn it is publishes the authoritative shared state.
-       This keeps the same local game mechanics on every device: the active
-       player's device performs the action, then sends the resulting state. */
+    /* In online mode, only the device whose local player is active publishes.
+       The canonical state always keeps the real player order. */
     if(!roomRef||!onlineStarted||onlineApplying||state.mode!=='online'||state.active!==0)return;
     try{await roomRef.update({state:serializeStateCanonical()});}
     catch(e){console.error(e);toast('Synchronisation Firebase impossible.')}
@@ -2986,10 +2986,24 @@ function dealStartingRemedies(){
     if(state.mode!=='online'||!onlineStarted||onlineApplying||state.active!==0||!roomRef)return;
     clearTimeout(syncTimer);syncTimer=setTimeout(writeOnlineState,100);
   }
+  function forceOnlineSync(){
+    if(state.mode!=='online'||!onlineStarted||onlineApplying||!roomRef||state.active!==0)return;
+    clearTimeout(syncTimer);syncTimer=setTimeout(writeOnlineState,20);
+  }
   const oldRender=window.renderGame;
   if(oldRender)window.renderGame=function(){const r=oldRender.apply(this,arguments);scheduleOnlineSync();return r;};
   const oldStart=window.startTurn;
-  if(oldStart)window.startTurn=function(i){if(state.mode==='online'&&state.active!==0&&i!==0){return oldStart.apply(this,arguments)}return oldStart.apply(this,arguments)};
+  if(oldStart)window.startTurn=function(i){
+    const r=oldStart.apply(this,arguments);
+    if(state.mode==='online'&&onlineStarted&&state.active===0)forceOnlineSync();
+    return r;
+  };
+  const oldEndTurnOnline=window.endTurn;
+  if(oldEndTurnOnline)window.endTurn=function(){
+    const r=oldEndTurnOnline.apply(this,arguments);
+    if(state.mode==='online'&&onlineStarted&&state.active===0)forceOnlineSync();
+    return r;
+  };
 
   /* Keep the online room across an accidental page refresh on a phone. */
   function rememberOnlineRoom(){
