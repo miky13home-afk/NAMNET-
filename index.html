@@ -3845,56 +3845,83 @@ function dealStartingRemedies(){
 }
 </style>
 <script id="namnet-online-sync-controller">
-/* NAMNET — ONLINE SYNC CONTROLLER
-   One sync mechanism only. Local game functions remain untouched.
-   State changes made by the player whose turn it is are detected and
-   published as one complete Firebase snapshot. Remote snapshots are never
-   echoed back.
-*/
+/* NAMNET — ONLINE CONTROLLER FINAL
+   Le moteur local reste inchangé. En ligne, le joueur local est présenté
+   au moteur en position 0 et chaque mutation est publiée comme état complet. */
 (function(){
   'use strict';
-  let lastSignature='';
-
-  function online(){return typeof state!=='undefined'&&state&&state.mode==='online';}
-  function localTurn(){
-    if(!online())return false;
-    const me=window.__namnetOnlineUid||null;
-    const active=state.onlineActiveUid||state.players?.[state.active]?.uid||null;
+  const uid=()=>window.__namnetOnlineUid||null;
+  const localEndTurn=window.endTurn;
+  const isOnline=()=>typeof state!=='undefined'&&state&&state.mode==='online';
+  const isMyTurn=()=>{
+    if(!isOnline())return true;
+    const me=uid(),active=state.onlineActiveUid||state.players?.[state.active]?.uid||null;
     return !!me&&active===me;
+  };
+  function localize(){
+    if(!isOnline())return true;
+    const me=uid(); if(!me||!Array.isArray(state.players))return false;
+    const idx=state.players.findIndex(p=>p&&p.uid===me); if(idx<0)return false;
+    if(idx!==0){
+      const old=state.players.slice();
+      const zones=Array.isArray(state.zoneByPlayer)?state.zoneByPlayer.slice():null;
+      state.players=old.slice(idx).concat(old.slice(0,idx));
+      if(zones)state.zoneByPlayer=zones.slice(idx).concat(zones.slice(0,idx));
+    }
+    if(isMyTurn())state.active=0;
+    return true;
   }
-  function signature(){
-    try{return window.__namnetOnlineSignature?.()||'';}catch(e){return '';}
+  async function publish(){
+    try{if(typeof window.__namnetOnlinePublish==='function')await window.__namnetOnlinePublish(false)}
+    catch(e){console.error('NAMNET online publish',e)}
   }
-  function markSynced(){lastSignature=signature();}
-
-  window.__namnetOnlineRemoteApplied=function(){markSynced();};
-
-  /* The existing online end-turn implementation is authoritative. It already
-     advances the UID and publishes the complete next-turn state. */
-  const currentEndTurn=window.endTurn;
-  if(typeof currentEndTurn==='function'){
-    window.endTurn=function(){
-      if(!online())return currentEndTurn.apply(this,arguments);
-      if(!localTurn()){toast("Ce n'est pas votre tour.");return;}
-      const result=currentEndTurn.apply(this,arguments);
-      setTimeout(markSynced,0);
-      return result;
+  function wrapMutation(name){
+    const original=window[name]; if(typeof original!=='function')return;
+    window[name]=function(){
+      if(!isOnline())return original.apply(this,arguments);
+      if(!localize()){toast('Synchronisation du joueur impossible.');return}
+      if(!isMyTurn()){toast("Ce n'est pas votre tour.");return}
+      const result=original.apply(this,arguments);
+      setTimeout(publish,0); return result;
     };
   }
-
-  function tick(){
-    if(!online()){lastSignature='';return;}
-    const sig=signature();
-    if(!sig)return;
-    if(window.__namnetOnlineApplying||window.__namnetOnlineSyncHold){lastSignature=sig;return;}
-    if(sig===lastSignature)return;
-    if(!localTurn()){lastSignature=sig;return;}
-    lastSignature=sig;
-    try{window.__namnetOnlinePublish?.(false);}catch(e){console.error('NAMNET online sync',e);}
-  }
-
-  window.setInterval(tick,250);
-  setTimeout(markSynced,0);
-  window.__namnetOnlineSyncControllerReady=true;
+  [
+    'discoverPlant','confirmDiscover','openShopBatch','changeShopQty','confirmShopBatch','buyMaterial',
+    'dryPlant','sellCards','confirmSell','confirmSellPair','finishSell','buyMarket','openMarketBuy',
+    'takeMarketCard','finishMarketBuy','selectRemedyForCreation','confirmRemedyCreation','drawNewRemedy',
+    'chooseNewRemedyType','playSpecialCard','playSpecialEffect','playEphemeralCard','applyEphemeralEffect',
+    'applyNeedleFromEphemeral','playTransactionCard','takeContraband','useArcane','resolveArcane',
+    'buyTonicToken','healLast','useRemedyToken','useTonic'
+  ].forEach(wrapMutation);
+  const originalOpenRemedies=window.openRemedies;
+  if(typeof originalOpenRemedies==='function')window.openRemedies=function(){
+    if(!isOnline())return originalOpenRemedies.apply(this,arguments);
+    if(!localize()){toast('Synchronisation du joueur impossible.');return}
+    return originalOpenRemedies.apply(this,arguments);
+  };
+  const originalAfterAction=window.afterAction;
+  if(typeof originalAfterAction==='function')window.afterAction=function(){
+    if(!isOnline())return originalAfterAction.apply(this,arguments);
+    if(!localize()){toast('Synchronisation du joueur impossible.');return}
+    const result=originalAfterAction.apply(this,arguments);
+    setTimeout(publish,0); return result;
+  };
+  window.endTurn=function(){
+    if(!isOnline())return typeof localEndTurn==='function'?localEndTurn.apply(this,arguments):undefined;
+    if(state.gameOver)return;
+    if(!localize()||!isMyTurn()){toast("Ce n'est pas votre tour.");return}
+    if(typeof checkEndPending==='function'&&checkEndPending()){endGame();return}
+    const me=uid(),idx=state.players.findIndex(p=>p&&p.uid===me);
+    if(idx<0||state.players.length<2){toast('Impossible de passer le tour.');return}
+    const nextIndex=(idx+1)%state.players.length,next=state.players[nextIndex];
+    if(!next||!next.uid){toast('Impossible de passer le tour.');return}
+    state.onlineActiveUid=next.uid; state.active=nextIndex;
+    if(nextIndex===0)state.day=(Number(state.day)||1)+1;
+    if(typeof startTurn==='function')startTurn(nextIndex);
+    renderGame();
+    try{if(typeof window.__namnetOnlinePublish==='function')window.__namnetOnlinePublish(true)}
+    catch(e){console.error('NAMNET online endTurn',e)}
+  };
+  window.__namnetOnlineControllerFinal=true;
 })();
 </script>
