@@ -3950,3 +3950,108 @@ function dealStartingRemedies(){
 }
 </style>
 
+
+<script id="namnet-v37-online-action-repair">
+(function(){
+  /* V37 — réparation ciblée de la partie partagée.
+     Ce bloc est volontairement placé EN DERNIER : plusieurs versions précédentes
+     redéfinissaient des fonctions après l'adaptateur Firebase, ce qui supprimait
+     leurs contrôles/synchronisations en ligne. On ne touche pas au moteur local. */
+  if(window.__namnetV37OnlineRepair)return;
+  window.__namnetV37OnlineRepair=true;
+
+  function onlineReady(){
+    if(state.mode!=='online')return true;
+    const uid=(()=>{try{return localStorage.getItem('namnetOnlineUid')}catch(e){return null}})();
+    const activeUid=state.onlineActiveUid||state.players?.[state.active]?.uid||null;
+    if(!uid||activeUid!==uid){toast("Ce n'est pas votre tour.");return false;}
+    /* All legacy gameplay functions operate on player 0. In shared mode the
+       local player's board is already rotated to index 0; force the legacy
+       active index to the same convention before calling the original code. */
+    state.active=0;
+    return Number(state.actions||0)>0;
+  }
+
+  function publish(){try{window.__namnetOnlinePublish?.(false)}catch(e){console.error(e)}}
+
+  /* These functions are actual gameplay actions or continuations of an action.
+     Wrapping them HERE, after every previous Vxx layer, makes the latest
+     definition authoritative without changing their local implementation. */
+  const actionNames=[
+    'discoverPlant','confirmDiscover','dryPlant',
+    'buyMaterial','buyTonicToken','useTonic','takeTonicCard',
+    'buyMarket','takeMarketCard','finishMarketBuy',
+    'sellCards','confirmSell','finishSell','closeSellWindow',
+    'selectRemedyForCreation','selectRemedyMaterial','selectRemedyPlant','confirmRemedyCreation',
+    'drawNewRemedy','chooseNewRemedyType','takeNewRemedy',
+    'playSpecialCard','playEphemeralCard','playTransactionCard',
+    'takeRarePlant','takeContraband',
+    'healLast','healWithPlants','healAllDirect','healLastDirect','useRemedyToken',
+    'usePlantTonicEffect'
+  ];
+
+  actionNames.forEach(name=>{
+    const fn=window[name];
+    if(typeof fn!=='function')return;
+    const mark='__namnetV37_'+name;
+    if(fn[mark])return;
+    function wrapped(){
+      if(state.mode==='online'&&!onlineReady())return;
+      const result=fn.apply(this,arguments);
+      if(state.mode==='online')publish();
+      return result;
+    }
+    wrapped[mark]=true;
+    window[name]=wrapped;
+  });
+
+  /* Opening the private remedy panel is deliberately NOT an action and remains
+     available exactly as in local mode. The creation/selection functions above
+     are the ones that are synchronized. */
+  const previewNames=['openRemedies'];
+  previewNames.forEach(name=>{
+    const fn=window[name];
+    if(typeof fn!=='function')return;
+    const mark='__namnetV37Preview_'+name;
+    if(fn[mark])return;
+    function wrapped(){return fn.apply(this,arguments)}
+    wrapped[mark]=true;
+    window[name]=wrapped;
+  });
+
+  /* These callbacks can be triggered from a modal opened by an already
+     authorized action. They must publish the resulting state but must not reject
+     the callback merely because the action counter has reached zero. */
+  ['applyEphemeralEffect','applyNeedleFromEphemeral','applyNeedle',
+   'takeTargetPlant','takeDriedToHand','takeDriedToRack',
+   'resolveNerveFirstAction'].forEach(name=>{
+    const fn=window[name];
+    if(typeof fn!=='function')return;
+    const mark='__namnetV37Callback_'+name;
+    if(fn[mark])return;
+    function wrapped(){
+      if(state.mode==='online'){
+        const uid=(()=>{try{return localStorage.getItem('namnetOnlineUid')}catch(e){return null}})();
+        const activeUid=state.onlineActiveUid||state.players?.[state.active]?.uid||null;
+        if(uid&&activeUid===uid)state.active=0;
+      }
+      const result=fn.apply(this,arguments);
+      if(state.mode==='online')publish();
+      return result;
+    }
+    wrapped[mark]=true;
+    window[name]=wrapped;
+  });
+
+  /* Safety net: if a later UI layer replaces one of the functions again, the
+     repair can be re-applied manually without duplicating wrappers. */
+  window.namnetRepairOnlineActions=function(){
+    actionNames.forEach(name=>{
+      const fn=window[name];if(typeof fn!=='function'||fn.__namnetV37_onlineWrapped)return;
+      const mark='__namnetV37_'+name;if(fn[mark])return;
+      function wrapped(){if(state.mode==='online'&&!onlineReady())return;const r=fn.apply(this,arguments);if(state.mode==='online')publish();return r}
+      wrapped[mark]=true;window[name]=wrapped;
+    });
+  };
+})();
+</script>
