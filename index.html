@@ -3123,157 +3123,121 @@ function dealStartingRemedies(){
   }
 })();</script>
 
-<script id="namnet-final-online-stable">
-/* NAMNET FINAL ONLINE STABILITY LAYER
-   One rule: local/AI mode is untouched. In shared mode, every device keeps
-   its own player at local index 0, while Firebase stores the canonical order.
-   This replaces the fragile stacked turn wrappers above. */
+
+
+<script id="namnet-online-single-adapter">
+/* NAMNET — ONLINE SINGLE ADAPTER
+   The local/AI engine is left untouched. Shared mode uses exactly one gate:
+   Firebase decides whose UID owns the turn; the local player is normalized to
+   index 0 before an action. No render function writes to Firebase. */
 (function(){
   'use strict';
-  const UID=()=>{try{return localStorage.getItem('namnetOnlineUid')}catch(e){return null}};
-  const isOnline=()=>window.state&&state.mode==='online';
+  const online=()=>window.state&&state.mode==='online';
+  const uid=()=>{try{return localStorage.getItem('namnetOnlineUid')}catch(e){return null}};
   const activeUid=()=>state.onlineActiveUid||state.players?.[state.active]?.uid||null;
-  const myIndex=()=>state.players?.findIndex(p=>p?.uid===UID())??-1;
-  const myTurn=()=>isOnline() && UID() && activeUid()===UID();
+  const localIndex=()=>state.players?.findIndex(p=>p?.uid===uid())??-1;
 
+  function rotateLocal(){
+    const me=localIndex();
+    if(me<0)return false;
+    if(me===0){state.active=state.players?.findIndex(p=>p?.uid===activeUid())??state.active;return true;}
+    const n=state.players.length;
+    const arr=state.players.slice(me).concat(state.players.slice(0,me));
+    const oldActiveUid=activeUid();
+    state.players=arr;
+    if(Array.isArray(state.zoneByPlayer))state.zoneByPlayer=state.zoneByPlayer.slice(me).concat(state.zoneByPlayer.slice(0,me));
+    state.active=state.players.findIndex(p=>p?.uid===oldActiveUid);
+    return true;
+  }
+
+  function canAct(){
+    if(!online())return true;
+    const me=uid(), act=activeUid();
+    if(!me || act!==me){toast("Ce n'est pas votre tour.");return false;}
+    if(!rotateLocal()){toast('Connexion joueur introuvable.');return false;}
+    state.active=0;
+    if(Number(state.actions||0)<=0){toast('Aucune action restante.');return false;}
+    return true;
+  }
   function publish(){
     try{return window.__namnetOnlinePublish?.(false)}catch(e){return Promise.resolve()}
   }
 
-  /* Reconnect-safe room memory. sessionStorage can disappear on some mobile
-     browsers; localStorage is therefore also used as a small recovery marker. */
-  function remember(){
-    try{
-      const data={code:window.roomCode||null,uid:UID(),started:true};
-      if(data.code)localStorage.setItem('namnetOnlineRecovery',JSON.stringify(data));
-    }catch(e){}
-  }
-
-  /* The original Firebase code keeps the room listener alive. We only add a
-     visibility/reconnect nudge; never write game state just because a tab
-     becomes visible. */
-  document.addEventListener('visibilitychange',()=>{
-    if(document.visibilityState==='visible' && isOnline()){
-      remember();
-      try{window.renderGame?.()}catch(e){}
-    }
-  });
-  window.addEventListener('online',()=>{if(isOnline()){remember();try{window.renderGame?.()}catch(e){}}});
-
-  /* Every human action must run with the connected player at index 0. This is
-     exactly how the validated local engine was written. */
-  const actionNames=[
+  /* Functions that START or COMPLETE a paid game action. */
+  const entries=[
     'discoverPlant','confirmDiscover','dryPlant','buyMarket','takeMarketCard','finishMarketBuy',
-    'buyMaterial','buyTonicToken','useTonic','takeTonicCard','sellCards','finishSell','confirmSell','closeSellWindow',
+    'buyMaterial','buyTonicToken','useTonic','takeTonicCard',
+    'sellCards','finishSell','confirmSellPair',
     'openRemedies','selectRemedyForCreation','selectRemedyMaterial','selectRemedyPlant','confirmRemedyCreation',
-    'drawNewRemedy','chooseNewRemedyType','takeNewRemedy','playSpecialCard','playEphemeralCard','playTransactionCard',
-    'takeRarePlant','takeContraband','healLast','healWithPlants','healAllDirect','healLastDirect',
-    'useRemedyToken','usePlantTonicEffect','playArcaneCard','playArcaneAgainst'
+    'drawNewRemedy','chooseNewRemedyType','takeNewRemedy',
+    'playSpecialCard','playEphemeralCard','playTransactionCard','takeRarePlant','takeContraband',
+    'healLast','healWithPlants','healAllDirect','healLastDirect','useRemedyToken','usePlantTonicEffect',
+    'buyMaterial','buyTonicToken'
   ];
 
-  function wrapAction(name){
+  /* Modal/target callbacks may happen after the initiating action has already
+     changed the action count, so they only need the turn check, not actions>0. */
+  const callbacks=[
+    'resolveArcane','applyArcaneEffect','applyEphemeralEffect','applyNeedleFromEphemeral','applyNeedle',
+    'takeTargetPlant','takeDriedToHand','takeDriedToRack','confirmSellPair','confirmRemedyCreation',
+    'useRemedyToken','takeRarePlant','takeContraband','takeTonicCard','finishMarketBuy','finishSell'
+  ];
+
+  const wrapped=new Set();
+  function wrap(name,needsAction){
+    if(wrapped.has(name))return;
     const fn=window[name];
-    if(typeof fn!=='function'||fn.__namnetFinalOnline)return;
-    const wrapped=function(){
-      if(!isOnline()) return fn.apply(this,arguments);
-      if(!myTurn()){toast("Ce n'est pas votre tour.");return;}
-      const mi=myIndex();
-      if(mi<0){toast('Connexion joueur introuvable.');return;}
-      /* The online renderer normally already rotates us to index 0. If a
-         previous legacy wrapper left another active index, restore the local
-         engine invariant for this action only. */
-      state.active=0;
-      const before=state.actions;
+    if(typeof fn!=='function')return;
+    const w=function(){
+      if(online()){
+        const me=uid(), act=activeUid();
+        if(!me || act!==me){toast("Ce n'est pas votre tour.");return;}
+        if(!rotateLocal()){toast('Connexion joueur introuvable.');return;}
+        state.active=0;
+        if(needsAction && Number(state.actions||0)<=0){toast('Aucune action restante.');return;}
+      }
       const r=fn.apply(this,arguments);
-      /* If the action actually changed the game, persist it. */
-      if(state.actions!==before || r!==undefined || name==='confirmDiscover' || name==='finishMarketBuy') publish();
-      remember();
+      if(online())publish();
       return r;
     };
-    wrapped.__namnetFinalOnline=true;
-    window[name]=wrapped;
+    w.__namnetSingleOnline=true;
+    window[name]=w;
+    wrapped.add(name);
   }
-  actionNames.forEach(wrapAction);
+  entries.forEach(n=>wrap(n,true));
+  callbacks.forEach(n=>wrap(n,false));
 
-  /* End turn is the only place where authority changes. The active player
-     prepares the next player's turn, publishes it, and then returns to their
-     own rotated view. */
+  /* End turn is the only authority transfer. Local/AI keeps its original path. */
   const oldEnd=window.endTurn;
-  if(typeof oldEnd==='function'){
-    const stableEndTurn=function(){
-      if(!isOnline())return oldEnd.apply(this,arguments);
-      if(!myTurn()){toast("Ce n'est pas votre tour.");return;}
+  if(typeof oldEnd==='function' && !oldEnd.__namnetSingleOnline){
+    const end=function(){
+      if(!online())return oldEnd.apply(this,arguments);
+      const me=uid(), act=activeUid();
+      if(!me || act!==me){toast("Ce n'est pas votre tour.");return;}
+      if(!rotateLocal()){toast('Connexion joueur introuvable.');return;}
+      state.active=0;
       if(state.gameOver)return;
-      if(typeof checkEndPending==='function' && checkEndPending()){endGame();publish();return;}
-
+      if(typeof checkEndPending==='function' && checkEndPending()){endGame();return publish();}
       const canonical=serializeStateCanonical();
       const ps=canonical.players||[];
-      const me=ps.findIndex(p=>p?.uid===UID());
-      if(me<0||!ps.length)return;
-      const nextIndex=(me+1)%ps.length;
-      const next=ps[nextIndex];
+      const i=ps.findIndex(p=>p?.uid===me);
+      if(i<0||!ps.length)return;
+      const next=ps[(i+1)%ps.length];
       if(!next?.uid)return;
-
-      /* Work in the current local order. */
       state.onlineActiveUid=next.uid;
       const ni=state.players.findIndex(p=>p?.uid===next.uid);
       if(ni<0)return;
       state.active=ni;
       if(ni===0)state.day=(Number(state.day)||1)+1;
       startTurn(ni);
-      /* startTurn may update actions and the hand; serialize that complete
-         state before anyone else can become authoritative. */
-      const write=window.__namnetOnlinePublish?.(true);
-      remember();
-      return write;
+      return window.__namnetOnlinePublish?.(true);
     };
-    stableEndTurn.__namnetFinalOnline=true;
-    window.endTurn=stableEndTurn;
+    end.__namnetSingleOnline=true;
+    window.endTurn=end;
   }
 
-  /* Display: in shared mode the header always names the real active player
-     and shows the local action count only when it is our turn. */
-  const oldRender=window.renderGame;
-  if(typeof oldRender==='function' && !oldRender.__namnetFinalRender){
-    const render=function(){
-      const r=oldRender.apply(this,arguments);
-      if(isOnline()){
-        const ai=state.players?.findIndex(p=>p?.uid===activeUid())??-1;
-        const active=ai>=0?state.players[ai]:null;
-        const cn=document.getElementById('currentName');
-        const al=document.getElementById('actionsLeft');
-        const sp=document.getElementById('statusPlayer');
-        if(cn)cn.textContent=myTurn()?(state.players?.[0]?.name||'Vous'):(active?.name||'');
-        if(al)al.textContent=myTurn()?`${Number(state.actions)||0} actions`:`Tour de ${active?.name||'?'}`;
-        if(sp)sp.textContent=active?.name||'Vous';
-      }
-      return r;
-    };
-    render.__namnetFinalRender=true;
-    window.renderGame=render;
-  }
-
-  /* Recovery after an interrupted mobile session. The existing room listener
-     remains the authority; this simply reconnects to the remembered room if
-     the page was reopened in the same browser. */
-  window.addEventListener('load',()=>{
-    setTimeout(async()=>{
-      if(isOnline())return;
-      try{
-        const raw=localStorage.getItem('namnetOnlineRecovery');
-        const rec=raw?JSON.parse(raw):null;
-        if(!rec?.code||!window.firebase?.database)return;
-        const code=String(rec.code).toUpperCase();
-        const ref=window.firebase.database().ref('rooms/'+code);
-        const snap=await ref.once('value');
-        const room=snap.val();
-        if(!room||!room.started||!room.state)return;
-        if(typeof window.__namnetResumeOnline==='function'){
-          await window.__namnetResumeOnline(code);
-        }
-      }catch(e){console.warn('NAMNET recovery',e)}
-    },300);
-  },{once:true});
+  /* Rendering is deliberately read-only. It never triggers a Firebase write. */
+  window.__namnetOnlineSingleAdapter=true;
 })();
 </script>
 </body></html>
@@ -3758,146 +3722,11 @@ function dealStartingRemedies(){
     };
   }
 
-  /* ONLINE ACTION GATE — use the player's UID as the authority for every action.
-     The board is locally rotated so the connected player is index 0, but some legacy
-     actions still check only state.active. Normalize that index immediately before
-     the action; local/AI mode remains completely unchanged. */
-  function onlineLocalTurn(){
-    if(state.mode!=='online')return true;
-    const me=state.players?.[0];
-    const activeUid=state.onlineActiveUid||state.players?.[state.active]?.uid||null;
-    if(!me||!activeUid||me.uid!==activeUid){toast("Ce n'est pas votre tour.");return false;}
-    state.active=0;
-    return true;
-  }
-  function onlineActionReady(){
-    return onlineLocalTurn() && Number(state.actions||0)>0;
-  }
-  const _discoverOnline=window.discoverPlant;
-  if(typeof _discoverOnline==='function')window.discoverPlant=function(){
-    if(!onlineActionReady())return;
-    return _discoverOnline.apply(this,arguments);
-  };
-  const _buyMarketOnline=window.buyMarket;
-  if(typeof _buyMarketOnline==='function')window.buyMarket=function(){
-    if(!onlineActionReady())return;
-    return _buyMarketOnline.apply(this,arguments);
-  };
-  const _takeMarketCardOnline=window.takeMarketCard;
-  if(typeof _takeMarketCardOnline==='function')window.takeMarketCard=function(){
-    if(!onlineActionReady())return;
-    return _takeMarketCardOnline.apply(this,arguments);
-  };
-  const _finishMarketBuyOnline=window.finishMarketBuy;
-  if(typeof _finishMarketBuyOnline==='function')window.finishMarketBuy=function(){
-    if(state.mode==='online'&&!onlineActionReady())return;
-    return _finishMarketBuyOnline.apply(this,arguments);
-  };
-  const _buyMaterialOnline=window.buyMaterial;
-  if(typeof _buyMaterialOnline==='function')window.buyMaterial=function(){
-    if(!onlineActionReady())return;
-    return _buyMaterialOnline.apply(this,arguments);
-  };
-  const _buyTonicOnline=window.buyTonicToken;
-  if(typeof _buyTonicOnline==='function')window.buyTonicToken=function(){
-    if(!onlineActionReady())return;
-    return _buyTonicOnline.apply(this,arguments);
-  };
-  const _playSpecialOnline=window.playSpecialCard;
-  if(typeof _playSpecialOnline==='function')window.playSpecialCard=function(){
-    if(!onlineActionReady())return;
-    return _playSpecialOnline.apply(this,arguments);
-  };
-  const _playEphemeralOnline=window.playEphemeralCard;
-  if(typeof _playEphemeralOnline==='function')window.playEphemeralCard=function(){
-    if(!onlineActionReady())return;
-    return _playEphemeralOnline.apply(this,arguments);
-  };
-  const _confirmDiscoverOnline=window.confirmDiscover;
-  if(typeof _confirmDiscoverOnline==='function')window.confirmDiscover=function(){
-    if(state.mode==='online'&&!onlineActionReady())return;
-    return _confirmDiscoverOnline.apply(this,arguments);
-  };
-
   /* Final normalization once the page is ready, without changing the visual layout. */
   window.addEventListener('load',()=>{try{canonicalizeAll()}catch(e){}},{once:true});
 })();
 </script>
-<script id="namnet-v31-online-final-adapter">
-(function(){
-  const localUid=()=>{try{return localStorage.getItem('namnetOnlineUid')}catch(e){return null}};
-  function onlineTurn(){
-    if(state.mode!=='online')return true;
-    const uid=localUid();
-    const activeUid=state.onlineActiveUid||state.players?.[state.active]?.uid||null;
-    const me=state.players?.[0];
-    if(!uid||!me||activeUid!==uid){toast("Ce n'est pas votre tour.");return false;}
-    /* Legacy actions expect the current player at index 0. */
-    state.active=0;
-    return Number(state.actions||0)>0;
-  }
-  function publish(){
-    try{window.__namnetOnlinePublish?.(false)}catch(e){}
-  }
 
-  /* Gate every player action. Local/AI mode is untouched. */
-  const gated=[
-    'discoverPlant','confirmDiscover','dryPlant','buyMarket','takeMarketCard','finishMarketBuy',
-    'buyMaterial','buyTonicToken','useTonic','takeTonicCard','sellCards','finishSell','confirmSell','closeSellWindow',
-    'openRemedies','selectRemedyForCreation','selectRemedyMaterial','selectRemedyPlant','confirmRemedyCreation',
-    'drawNewRemedy','chooseNewRemedyType','takeNewRemedy',
-    'playSpecialCard','playEphemeralCard','playTransactionCard','takeRarePlant','takeContraband',
-    'healLast','healWithPlants','healAllDirect','healLastDirect','useRemedyToken','usePlantTonicEffect'
-  ];
-  const originals={};
-  gated.forEach(name=>{
-    const fn=window[name];
-    if(typeof fn!=='function')return;
-    originals[name]=fn;
-    window[name]=function(){
-      if(state.mode==='online'&&!onlineTurn())return;
-      const r=fn.apply(this,arguments);
-      /* Publishing is safe here because only the active UID is allowed to write.
-         It also covers multi-step actions whose final callback does not call afterAction. */
-      if(state.mode==='online')publish();
-      return r;
-    };
-  });
-
-  /* These are resolution callbacks, not new actions. They must still be allowed
-     when the initiating action has already reduced the action counter to zero. */
-  ['applyEphemeralEffect','applyNeedleFromEphemeral','applyNeedle','takeTargetPlant','takeDriedToHand','takeDriedToRack'].forEach(name=>{
-    const fn=window[name];
-    if(typeof fn!=='function')return;
-    window[name]=function(){
-      const r=fn.apply(this,arguments);
-      if(state.mode==='online')publish();
-      return r;
-    };
-  });
-
-  /* Any ordinary action that reaches afterAction is also persisted. */
-  const oa=window.afterAction;
-  if(typeof oa==='function'){
-    window.afterAction=function(){
-      const r=oa.apply(this,arguments);
-      if(state.mode==='online')publish();
-      return r;
-    };
-  }
-
-  /* The final market purchase handler stays the original game mechanic: the
-     market remains open until the player presses Terminer. */
-  /* Turn button: use the authoritative endTurn installed by the Firebase layer. */
-  const oe=window.endTurn;
-  if(typeof oe==='function'){
-    window.endTurn=function(){
-      if(state.mode!=='online')return oe.apply(this,arguments);
-      return oe.apply(this,arguments);
-    };
-  }
-})();
-</script>
 
 <style id="namnet-v29-side-bands">
 /* V29 : décor extérieur uniquement. La table existante reste totalement inchangée. */
