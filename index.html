@@ -3123,15 +3123,11 @@ function dealStartingRemedies(){
   }
 })();</script>
 
-
-
-
-<script id="namnet-online-single-bridge">
-/* NAMNET — ONE ONLINE BRIDGE
-   Local mode is untouched.
-   Online mode keeps the game engine's normal action functions. This bridge
-   only guarantees that the local player is index 0 and publishes a completed
-   mutation. It NEVER publishes from renderGame().
+<script id="namnet-online-final-bridge">
+/* NAMNET — FINAL ONLINE PATH
+   This block is intentionally at the END of the document so it wraps the
+   functions that are actually effective after all older definitions.
+   Local mode is left on its original functions.
 */
 (function(){
   'use strict';
@@ -3140,87 +3136,131 @@ function dealStartingRemedies(){
     return typeof state!=='undefined' && state && state.mode==='online';
   }
 
-  function activeUid(){
-    return state.onlineActiveUid || state.players?.[state.active]?.uid || null;
+  function localUid(){
+    return typeof onlineUid!=='undefined' ? onlineUid : null;
   }
 
   function prepareLocalView(){
     if(!isOnline()) return true;
-    if(typeof onlineUid==='undefined' || !onlineUid) return false;
+    const uid=localUid();
+    if(!uid) return false;
     const players=state.players||[];
-    const me=players.findIndex(p=>p&&p.uid===onlineUid);
+    let me=players.findIndex(p=>p&&p.uid===uid);
     if(me<0) return false;
 
-    /* The whole local engine assumes players[0] is the human player. */
     if(me!==0){
       const oldPlayers=players.slice();
+      const oldZones=Array.isArray(state.zoneByPlayer)?state.zoneByPlayer.slice():null;
+      const oldActiveUid=oldPlayers[state.active]?.uid||state.onlineActiveUid||null;
+
       state.players=oldPlayers.slice(me).concat(oldPlayers.slice(0,me));
-      state.players.forEach((p,i)=>{p.onlineIndex=p.onlineIndex??i});
+      state.players.forEach((p,i)=>{if(p)p.onlineIndex=p.onlineIndex??i});
 
-      if(Array.isArray(state.zoneByPlayer)){
-        const z=state.zoneByPlayer.slice();
-        state.zoneByPlayer=z.slice(me).concat(z.slice(0,me));
+      if(oldZones){
+        state.zoneByPlayer=oldZones.slice(me).concat(oldZones.slice(0,me));
       }
 
-      const oldActiveUid=oldPlayers[state.active]?.uid;
-      if(oldActiveUid===onlineUid || activeUid()===onlineUid) state.active=0;
+      me=0;
+      if(oldActiveUid===uid) state.active=0;
       else {
-        const ni=state.players.findIndex(p=>p.uid===oldActiveUid);
-        if(ni>=0) state.active=ni;
+        const next=state.players.findIndex(p=>p&&p.uid===oldActiveUid);
+        if(next>=0) state.active=next;
       }
-    } else if(activeUid()===onlineUid){
-      state.active=0;
     }
-    return activeUid()===onlineUid && state.active===0;
+
+    return true;
   }
 
-  async function publish(){
+  function publishSoon(){
     if(!isOnline()) return;
     try{
       if(typeof window.__namnetOnlinePublish==='function'){
-        await window.__namnetOnlinePublish(false);
+        setTimeout(()=>window.__namnetOnlinePublish(false),0);
       }
     }catch(e){ console.error('NAMNET online publish',e); }
   }
 
-  /* Rendering is deliberately NOT connected to Firebase. */
-  window.__namnetOnlinePrepareLocalView=prepareLocalView;
-
-  const names=[
-    'discoverPlant','confirmDiscover','dryPlant',
-    'buyMaterial','buyTonicToken','buyMarket',
-    'takeMarketCard','finishMarketBuy','closeMarketWindow',
-    'confirmShopBatch',
-    'sellCards','confirmSell','confirmSellPair','finishSell','closeSellWindow',
-    'drawNewRemedy','chooseNewRemedyType',
-    'openRemedies','selectRemedyForCreation','selectRemedyMaterial','selectRemedyPlant','confirmRemedyCreation',
-    'healLast','confirmHeal','useRemedyToken',
-    'playSpecialCard','playSpecialEffect',
-    'playEphemeralCard','playTransactionCard',
-    'useArcane'
-  ];
-
-  names.forEach(name=>{
+  function wrapAction(name){
     const original=window[name];
-    if(typeof original!=='function' || original.__namnetSingleBridge) return;
+    if(typeof original!=='function' || original.__namnetFinalOnline) return;
     const wrapped=function(){
-      if(isOnline() && !prepareLocalView()){
-        toast?.("Ce n'est pas votre tour.");
-        return;
+      if(isOnline()){
+        if(!prepareLocalView()){
+          toast?.("Synchronisation du joueur impossible.");
+          return;
+        }
+        const result=original.apply(this,arguments);
+        publishSoon();
+        return result;
       }
-      const result=original.apply(this,arguments);
-      if(isOnline()) setTimeout(publish,0);
+      return original.apply(this,arguments);
+    };
+    wrapped.__namnetFinalOnline=true;
+    window[name]=wrapped;
+  }
+
+  [
+    'discoverPlant','confirmDiscover',
+    'buyMaterial','openShopBatch','confirmShopBatch',
+    'takeMarketCard','finishMarketBuy',
+    'sellCards','confirmSell','finishSell',
+    'openRemedies','selectRemedyForCreation','confirmRemedyCreation',
+    'playEphemeralCard','playTransactionCard','playSpecialCard',
+    'useArcane',
+    'healLast','useRemedyToken',
+    'dryPlant','buyTonicToken',
+    'drawNewRemedy','chooseNewRemedyType'
+  ].forEach(wrapAction);
+
+  /* Every completed action already goes through afterAction in the game
+     engine. Publishing here makes that completed state authoritative online. */
+  const originalAfterAction=window.afterAction;
+  if(typeof originalAfterAction==='function' && !originalAfterAction.__namnetFinalOnline){
+    const wrappedAfterAction=function(){
+      const result=originalAfterAction.apply(this,arguments);
+      if(isOnline()) publishSoon();
       return result;
     };
-    wrapped.__namnetSingleBridge=true;
-    window[name]=wrapped;
-  });
+    wrappedAfterAction.__namnetFinalOnline=true;
+    window.afterAction=wrappedAfterAction;
+  }
 
-  /* End turn remains the dedicated online transition handler. */
-  window.__namnetOnlineBridgeReady=true;
+  /* Turn passing is handled here after all older endTurn definitions have
+     loaded. Local mode keeps the original endTurn untouched. */
+  const originalEndTurn=window.endTurn;
+  if(typeof originalEndTurn==='function' && !originalEndTurn.__namnetFinalOnline){
+    const wrappedEndTurn=function(){
+      if(!isOnline()) return originalEndTurn.apply(this,arguments);
+
+      if(!prepareLocalView()){
+        toast?.("Synchronisation du joueur impossible.");
+        return;
+      }
+
+      const uid=localUid();
+      const activeUid=state.onlineActiveUid||state.players?.[state.active]?.uid||null;
+      if(activeUid!==uid){
+        toast("Ce n'est pas votre tour.");
+        return;
+      }
+
+      const result=originalEndTurn.apply(this,arguments);
+
+      if(!state.gameOver){
+        state.onlineActiveUid=state.players?.[state.active]?.uid||null;
+        if(typeof window.__namnetOnlinePublish==='function'){
+          setTimeout(()=>window.__namnetOnlinePublish(true),0);
+        }
+      }
+      return result;
+    };
+    wrappedEndTurn.__namnetFinalOnline=true;
+    window.endTurn=wrappedEndTurn;
+  }
+
+  window.__namnetFinalOnlineBridgeReady=true;
 })();
 </script>
-
 </body></html>
 <style id="v4-final-fixes">
 .zone-mont .zone-symptoms{left:8%!important;right:auto!important;top:12px!important;bottom:auto!important}
