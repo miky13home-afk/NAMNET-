@@ -2916,6 +2916,7 @@ function dealStartingRemedies(){
     state.zoneByPlayer=players.map(p=>p.zone);state.onlineRoom=roomCode;state.onlineHost=true;
     state.onlinePlayers=players.map(p=>({uid:p.uid,onlineIndex:p.onlineIndex}));
     onlineStarted=true;
+    window.__namnetOnlineSyncHold=true;
     try{sessionStorage.setItem('namnetOnlineStarted','1')}catch(e){}
     /* Build the complete starting state locally first. */
     dealStartingRemedies();
@@ -2924,7 +2925,12 @@ function dealStartingRemedies(){
     /* IMPORTANT: publish started + complete state in ONE Firebase update.
        This prevents guests from seeing a half-started room and falling back to the lobby. */
     const canonical=serializeStateCanonical();
-    await roomRef.update({started:true,state:canonical});
+    try{
+      await roomRef.update({started:true,state:canonical});
+    }finally{
+      window.__namnetOnlineSyncHold=false;
+      try{ window.__namnetOnlineRemoteApplied?.(); }catch(e){}
+    }
   };
   window.leaveOnlineRoom=async function(){try{if(roomRef&&onlineHost)await roomRef.remove()}catch(e){}forgetOnlineRoom();roomRef=null;roomCode='';onlinePlayerIndex=null;onlineHost=false;onlineStarted=false;closeModal();modeScreen();};
 
@@ -2967,6 +2973,7 @@ function dealStartingRemedies(){
   function applyRemoteState(raw){
     if(!raw)return;
     onlineApplying=true;
+    window.__namnetOnlineApplying=true;
     /* A remote start is authoritative: lock this device into the online game. */
     state.mode='online';
     state.onlineRoom=roomCode;
@@ -2987,6 +2994,8 @@ function dealStartingRemedies(){
        must NOT immediately publish this freshly received snapshot back to Firebase. */
     renderGame();
     onlineApplying=false;
+    window.__namnetOnlineApplying=false;
+    try{ window.__namnetOnlineRemoteApplied?.(); }catch(e){}
   }
   let syncTimer=null;
   /* ONLINE SYNC — one authoritative writer: the player whose turn it is.
@@ -3006,6 +3015,7 @@ function dealStartingRemedies(){
     return;
   }
   window.__namnetOnlinePublish=function(force=false){return writeOnlineState(!!force)};
+  window.__namnetOnlineSignature=function(){try{return JSON.stringify(serializeStateCanonical())}catch(e){return ''}};
   window.__namnetOnlineIsLocalTurn=function(){
     if(state.mode!=='online')return true;
     const activeUid=state.onlineActiveUid||state.players?.[state.active]?.uid||null;
@@ -3834,83 +3844,57 @@ function dealStartingRemedies(){
   }
 }
 </style>
-<script id="namnet-online-final-bridge">
-/* NAMNET — ONLINE FINAL PATH
-   This is deliberately the LAST script in the document.
-   It wraps the functions that are actually effective after all legacy overrides.
-   Local mode is untouched.
+<script id="namnet-online-sync-controller">
+/* NAMNET — ONLINE SYNC CONTROLLER
+   One sync mechanism only. Local game functions remain untouched.
+   State changes made by the player whose turn it is are detected and
+   published as one complete Firebase snapshot. Remote snapshots are never
+   echoed back.
 */
 (function(){
   'use strict';
-  function isOnline(){ return typeof state!=='undefined' && state && state.mode==='online'; }
-  function uid(){ return window.__namnetOnlineUid || null; }
-  function localIsTurn(){
-    if(!isOnline()) return true;
-    const me=uid();
-    const active=state.onlineActiveUid || state.players?.[state.active]?.uid || null;
-    return !!me && active===me;
+  let lastSignature='';
+
+  function online(){return typeof state!=='undefined'&&state&&state.mode==='online';}
+  function localTurn(){
+    if(!online())return false;
+    const me=window.__namnetOnlineUid||null;
+    const active=state.onlineActiveUid||state.players?.[state.active]?.uid||null;
+    return !!me&&active===me;
   }
-  function prepare(){
-    if(!isOnline()) return true;
-    const me=uid(); if(!me) return false;
-    const ps=state.players||[]; const mine=ps.findIndex(p=>p&&p.uid===me);
-    if(mine<0) return false;
-    if(mine!==0){
-      const old=ps.slice();
-      const oldZones=Array.isArray(state.zoneByPlayer)?state.zoneByPlayer.slice():null;
-      const oldActiveUid=state.onlineActiveUid || old[state.active]?.uid || null;
-      state.players=old.slice(mine).concat(old.slice(0,mine));
-      if(oldZones) state.zoneByPlayer=oldZones.slice(mine).concat(oldZones.slice(0,mine));
-      const ni=state.players.findIndex(p=>p&&p.uid===oldActiveUid);
-      state.active=ni>=0?ni:0;
-    }
-    if(localIsTurn()) state.active=0;
-    return true;
+  function signature(){
+    try{return window.__namnetOnlineSignature?.()||'';}catch(e){return '';}
   }
-  function publish(){
-    if(!isOnline() || !localIsTurn()) return;
-    try{ if(typeof window.__namnetOnlinePublish==='function') setTimeout(()=>window.__namnetOnlinePublish(false),0); }
-    catch(e){ console.error('NAMNET online publish',e); }
-  }
-  function wrap(name){
-    const original=window[name];
-    if(typeof original!=='function' || original.__namnetOnlineFinalV2) return;
-    window[name]=function(){
-      if(isOnline()){
-        if(!prepare()){ toast?.('Synchronisation du joueur impossible.'); return; }
-        if(!localIsTurn()){ toast("Ce n'est pas votre tour."); return; }
-        const r=original.apply(this,arguments); publish(); return r;
-      }
-      return original.apply(this,arguments);
-    };
-    window[name].__namnetOnlineFinalV2=true;
-  }
-  [
-    'discoverPlant','confirmDiscover',
-    'openShopBatch','changeShopQty','confirmShopBatch','buyMaterial',
-    'buyMarket','openMarketBuy','takeMarketCard','finishMarketBuy','closeMarketWindow',
-    'sellCards','confirmSell','confirmSellPair','finishSell','closeSellWindow',
-    'openRemedies','selectRemedyForCreation','confirmRemedyCreation',
-    'drawNewRemedy','chooseNewRemedyType',
-    'playSpecialCard','playSpecialEffect','playEphemeralCard','applyEphemeralEffect',
-    'applyNeedleFromEphemeral','playTransactionCard','takeContraband',
-    'useArcane','resolveArcane','dryPlant','buyTonicToken','healLast','useRemedyToken'
-  ].forEach(wrap);
-  wrap('afterAction');
-  const oldEnd=window.endTurn;
-  if(typeof oldEnd==='function' && !oldEnd.__namnetOnlineFinalV2){
+  function markSynced(){lastSignature=signature();}
+
+  window.__namnetOnlineRemoteApplied=function(){markSynced();};
+
+  /* The existing online end-turn implementation is authoritative. It already
+     advances the UID and publishes the complete next-turn state. */
+  const currentEndTurn=window.endTurn;
+  if(typeof currentEndTurn==='function'){
     window.endTurn=function(){
-      if(!isOnline()) return oldEnd.apply(this,arguments);
-      if(!prepare() || !localIsTurn()){ toast("Ce n'est pas votre tour."); return; }
-      const result=oldEnd.apply(this,arguments);
-      if(!state.gameOver){
-        state.onlineActiveUid=state.players?.[state.active]?.uid || state.onlineActiveUid;
-        if(typeof window.__namnetOnlinePublish==='function') setTimeout(()=>window.__namnetOnlinePublish(true),0);
-      }
+      if(!online())return currentEndTurn.apply(this,arguments);
+      if(!localTurn()){toast("Ce n'est pas votre tour.");return;}
+      const result=currentEndTurn.apply(this,arguments);
+      setTimeout(markSynced,0);
       return result;
     };
-    window.endTurn.__namnetOnlineFinalV2=true;
   }
-  window.__namnetOnlineFinalV2Ready=true;
+
+  function tick(){
+    if(!online()){lastSignature='';return;}
+    const sig=signature();
+    if(!sig)return;
+    if(window.__namnetOnlineApplying||window.__namnetOnlineSyncHold){lastSignature=sig;return;}
+    if(sig===lastSignature)return;
+    if(!localTurn()){lastSignature=sig;return;}
+    lastSignature=sig;
+    try{window.__namnetOnlinePublish?.(false);}catch(e){console.error('NAMNET online sync',e);}
+  }
+
+  window.setInterval(tick,250);
+  setTimeout(markSynced,0);
+  window.__namnetOnlineSyncControllerReady=true;
 })();
 </script>
