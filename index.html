@@ -3063,6 +3063,24 @@ function dealStartingRemedies(){
       modeScreen();
     },50);
   });
+  /* Public recovery hook: keeps Firebase/session details private inside this
+     module while allowing the final stability layer to request a clean rejoin. */
+  window.__namnetResumeOnline=async function(code){
+    try{
+      if(!ensureFirebase())return false;
+      const c=String(code||'').trim().toUpperCase();
+      if(!c)return false;
+      const ref=roomPath(c),snap=await ref.once('value'),room=snap.val();
+      if(!room||!room.started||!room.state)return false;
+      const me=(room.players||[]).find(p=>p.uid===onlineUid);
+      if(!me)return false;
+      roomCode=c;roomRef=ref;onlinePlayerIndex=me.onlineIndex;onlineHost=room.hostUid===onlineUid;onlineStarted=true;
+      try{sessionStorage.setItem('nammetOnlineStarted','1')}catch(e){}
+      state.mode='online';state.onlineRoom=c;
+      listenRoom();
+      return true;
+    }catch(e){console.warn('NAMNET online recovery',e);return false}
+  };
   modeScreen();
 })();
 </script>
@@ -3105,134 +3123,157 @@ function dealStartingRemedies(){
   }
 })();</script>
 
-<script id="namnet-v38-online-turn-fix">
+<script id="namnet-final-online-stable">
+/* NAMNET FINAL ONLINE STABILITY LAYER
+   One rule: local/AI mode is untouched. In shared mode, every device keeps
+   its own player at local index 0, while Firebase stores the canonical order.
+   This replaces the fragile stacked turn wrappers above. */
 (function(){
-  /* V38 — correction ciblée du premier tour partagé.
-     Ne modifie ni le moteur local ni le design. Le joueur connecté est retrouvé
-     par son UID Firebase, puis les anciennes fonctions qui travaillent sur le
-     joueur 0 reçoivent le bon contexte. */
-  if(window.__namnetV38OnlineFix)return;
-  window.__namnetV38OnlineFix=true;
+  'use strict';
+  const UID=()=>{try{return localStorage.getItem('namnetOnlineUid')}catch(e){return null}};
+  const isOnline=()=>window.state&&state.mode==='online';
+  const activeUid=()=>state.onlineActiveUid||state.players?.[state.active]?.uid||null;
+  const myIndex=()=>state.players?.findIndex(p=>p?.uid===UID())??-1;
+  const myTurn=()=>isOnline() && UID() && activeUid()===UID();
 
-  function uid(){try{return localStorage.getItem('namnetOnlineUid')}catch(e){return null}}
-  function activeUid(){return state.onlineActiveUid||state.players?.[state.active]?.uid||null}
-  function localIndex(){
-    const id=uid();
-    return id&&Array.isArray(state.players)?state.players.findIndex(p=>p&&p.uid===id):-1;
+  function publish(){
+    try{return window.__namnetOnlinePublish?.(false)}catch(e){return Promise.resolve()}
   }
 
-  function repairOnlineTurnContext(){
-    if(state.mode!=='online')return true;
-    const meIndex=localIndex();
-    const aUid=activeUid();
-    if(meIndex<0 || !aUid)return false;
-
-    /* applyRemoteState normally rotates the local player to index 0. If a
-       previous snapshot left the array in another order, repair that locally
-       instead of blocking every action. */
-    if(meIndex!==0){
-      const order=[meIndex,...state.players.map((_,i)=>i).filter(i=>i!==meIndex)];
-      const oldPlayers=state.players;
-      state.players=order.map(i=>oldPlayers[i]);
-      if(Array.isArray(state.zoneByPlayer))state.zoneByPlayer=order.map(i=>state.zoneByPlayer[i]);
-      const oldActive=Number(state.active)||0;
-      const newActive=order.indexOf(oldActive);
-      state.active=newActive>=0?newActive:0;
-    }
-    return true;
-  }
-
-  function localTurn(){
-    if(state.mode!=='online')return true;
-    if(!repairOnlineTurnContext())return false;
-    const id=uid();
-    if(activeUid()!==id){toast("Ce n'est pas votre tour.");return false}
-    state.active=0;
-    return true;
-  }
-
-  function onlineReady(){
-    if(!localTurn())return false;
-    if(Number(state.actions||0)<=0){toast('Vous n’avez plus d’action ce tour.');return false}
-    return true;
-  }
-
-  /* The online host must begin with a real turn, exactly like the local game.
-     Some previous layers could publish the setup snapshot before startTurn(). */
-  function ensureFirstOnlineTurn(){
-    if(state.mode!=='online'||!state.started)return;
-    if(Number(state.turnId||0)===0){
-      state.active=0;
-      if(typeof startTurn==='function')startTurn(0);
-      else state.actions=2;
-    }
-  }
-
-  /* Refresh the header without touching the table layout. */
-  function refreshOnlineHeader(){
-    if(state.mode!=='online')return;
-    const ap=state.players?.[state.active];
-    const name=ap?.name||'Vous';
-    const mine=activeUid()===uid();
-    const a=document.getElementById('actionsLeft');
-    const sp=document.getElementById('statusPlayer');
-    const nt=document.getElementById('npcTurnName');
-    const na=document.getElementById('npcTurnActions');
-    if(a)a.textContent=mine ? ('Tour de '+name+' · '+Number(state.actions||0)+' action'+(Number(state.actions||0)>1?'s':'')) : ('Tour de '+name);
-    if(sp)sp.textContent=name;
-    if(nt)nt.textContent=name;
-    if(na)na.textContent=mine?Number(state.actions||0):'—';
-  }
-
-  /* Re-wrap the action entry points after all previous Vxx layers. */
-  const names=[
-    'discoverPlant','confirmDiscover','dryPlant','buyMaterial','buyTonicToken','useTonic','takeTonicCard',
-    'buyMarket','takeMarketCard','finishMarketBuy','sellCards','confirmSell','finishSell','closeSellWindow',
-    'selectRemedyForCreation','selectRemedyMaterial','selectRemedyPlant','confirmRemedyCreation',
-    'drawNewRemedy','chooseNewRemedyType','takeNewRemedy','playSpecialCard','playEphemeralCard',
-    'playTransactionCard','takeRarePlant','takeContraband','healLast','healWithPlants','healAllDirect',
-    'healLastDirect','useRemedyToken','usePlantTonicEffect'
-  ];
-  names.forEach(name=>{
-    const fn=window[name];
-    if(typeof fn!=='function')return;
-    const mark='__namnetV38_'+name;
-    if(fn[mark])return;
-    function wrapped(){
-      if(state.mode==='online'&&!onlineReady())return;
-      const r=fn.apply(this,arguments);
-      if(state.mode==='online'){
-        refreshOnlineHeader();
-        try{window.__namnetOnlinePublish?.(false)}catch(e){}
-      }
-      return r;
-    }
-    wrapped[mark]=true;
-    window[name]=wrapped;
-  });
-
-  /* renderGame is display-only here; it cannot write Firebase. */
-  const rg=window.renderGame;
-  if(typeof rg==='function'&&!rg.__namnetV38Render){
-    function renderWrapped(){
-      if(state.mode==='online')repairOnlineTurnContext();
-      const r=rg.apply(this,arguments);
-      if(state.mode==='online')refreshOnlineHeader();
-      return r;
-    }
-    renderWrapped.__namnetV38Render=true;
-    window.renderGame=renderWrapped;
-  }
-
-  window.addEventListener('load',()=>setTimeout(()=>{
+  /* Reconnect-safe room memory. sessionStorage can disappear on some mobile
+     browsers; localStorage is therefore also used as a small recovery marker. */
+  function remember(){
     try{
-      if(state.mode==='online'){
-        repairOnlineTurnContext();
-        ensureFirstOnlineTurn();
-        refreshOnlineHeader();
+      const data={code:window.roomCode||null,uid:UID(),started:true};
+      if(data.code)localStorage.setItem('namnetOnlineRecovery',JSON.stringify(data));
+    }catch(e){}
+  }
+
+  /* The original Firebase code keeps the room listener alive. We only add a
+     visibility/reconnect nudge; never write game state just because a tab
+     becomes visible. */
+  document.addEventListener('visibilitychange',()=>{
+    if(document.visibilityState==='visible' && isOnline()){
+      remember();
+      try{window.renderGame?.()}catch(e){}
+    }
+  });
+  window.addEventListener('online',()=>{if(isOnline()){remember();try{window.renderGame?.()}catch(e){}}});
+
+  /* Every human action must run with the connected player at index 0. This is
+     exactly how the validated local engine was written. */
+  const actionNames=[
+    'discoverPlant','confirmDiscover','dryPlant','buyMarket','takeMarketCard','finishMarketBuy',
+    'buyMaterial','buyTonicToken','useTonic','takeTonicCard','sellCards','finishSell','confirmSell','closeSellWindow',
+    'openRemedies','selectRemedyForCreation','selectRemedyMaterial','selectRemedyPlant','confirmRemedyCreation',
+    'drawNewRemedy','chooseNewRemedyType','takeNewRemedy','playSpecialCard','playEphemeralCard','playTransactionCard',
+    'takeRarePlant','takeContraband','healLast','healWithPlants','healAllDirect','healLastDirect',
+    'useRemedyToken','usePlantTonicEffect','playArcaneCard','playArcaneAgainst'
+  ];
+
+  function wrapAction(name){
+    const fn=window[name];
+    if(typeof fn!=='function'||fn.__namnetFinalOnline)return;
+    const wrapped=function(){
+      if(!isOnline()) return fn.apply(this,arguments);
+      if(!myTurn()){toast("Ce n'est pas votre tour.");return;}
+      const mi=myIndex();
+      if(mi<0){toast('Connexion joueur introuvable.');return;}
+      /* The online renderer normally already rotates us to index 0. If a
+         previous legacy wrapper left another active index, restore the local
+         engine invariant for this action only. */
+      state.active=0;
+      const before=state.actions;
+      const r=fn.apply(this,arguments);
+      /* If the action actually changed the game, persist it. */
+      if(state.actions!==before || r!==undefined || name==='confirmDiscover' || name==='finishMarketBuy') publish();
+      remember();
+      return r;
+    };
+    wrapped.__namnetFinalOnline=true;
+    window[name]=wrapped;
+  }
+  actionNames.forEach(wrapAction);
+
+  /* End turn is the only place where authority changes. The active player
+     prepares the next player's turn, publishes it, and then returns to their
+     own rotated view. */
+  const oldEnd=window.endTurn;
+  if(typeof oldEnd==='function'){
+    const stableEndTurn=function(){
+      if(!isOnline())return oldEnd.apply(this,arguments);
+      if(!myTurn()){toast("Ce n'est pas votre tour.");return;}
+      if(state.gameOver)return;
+      if(typeof checkEndPending==='function' && checkEndPending()){endGame();publish();return;}
+
+      const canonical=serializeStateCanonical();
+      const ps=canonical.players||[];
+      const me=ps.findIndex(p=>p?.uid===UID());
+      if(me<0||!ps.length)return;
+      const nextIndex=(me+1)%ps.length;
+      const next=ps[nextIndex];
+      if(!next?.uid)return;
+
+      /* Work in the current local order. */
+      state.onlineActiveUid=next.uid;
+      const ni=state.players.findIndex(p=>p?.uid===next.uid);
+      if(ni<0)return;
+      state.active=ni;
+      if(ni===0)state.day=(Number(state.day)||1)+1;
+      startTurn(ni);
+      /* startTurn may update actions and the hand; serialize that complete
+         state before anyone else can become authoritative. */
+      const write=window.__namnetOnlinePublish?.(true);
+      remember();
+      return write;
+    };
+    stableEndTurn.__namnetFinalOnline=true;
+    window.endTurn=stableEndTurn;
+  }
+
+  /* Display: in shared mode the header always names the real active player
+     and shows the local action count only when it is our turn. */
+  const oldRender=window.renderGame;
+  if(typeof oldRender==='function' && !oldRender.__namnetFinalRender){
+    const render=function(){
+      const r=oldRender.apply(this,arguments);
+      if(isOnline()){
+        const ai=state.players?.findIndex(p=>p?.uid===activeUid())??-1;
+        const active=ai>=0?state.players[ai]:null;
+        const cn=document.getElementById('currentName');
+        const al=document.getElementById('actionsLeft');
+        const sp=document.getElementById('statusPlayer');
+        if(cn)cn.textContent=myTurn()?(state.players?.[0]?.name||'Vous'):(active?.name||'');
+        if(al)al.textContent=myTurn()?`${Number(state.actions)||0} actions`:`Tour de ${active?.name||'?'}`;
+        if(sp)sp.textContent=active?.name||'Vous';
       }
-    }catch(e){console.error(e)}
-  },120));
+      return r;
+    };
+    render.__namnetFinalRender=true;
+    window.renderGame=render;
+  }
+
+  /* Recovery after an interrupted mobile session. The existing room listener
+     remains the authority; this simply reconnects to the remembered room if
+     the page was reopened in the same browser. */
+  window.addEventListener('load',()=>{
+    setTimeout(async()=>{
+      if(isOnline())return;
+      try{
+        const raw=localStorage.getItem('namnetOnlineRecovery');
+        const rec=raw?JSON.parse(raw):null;
+        if(!rec?.code||!window.firebase?.database)return;
+        const code=String(rec.code).toUpperCase();
+        const ref=window.firebase.database().ref('rooms/'+code);
+        const snap=await ref.once('value');
+        const room=snap.val();
+        if(!room||!room.started||!room.state)return;
+        if(typeof window.__namnetResumeOnline==='function'){
+          await window.__namnetResumeOnline(code);
+        }
+      }catch(e){console.warn('NAMNET recovery',e)}
+    },300);
+  },{once:true});
 })();
 </script>
 </body></html>
@@ -4081,108 +4122,3 @@ function dealStartingRemedies(){
 }
 </style>
 
-
-<script id="namnet-v37-online-action-repair">
-(function(){
-  /* V37 — réparation ciblée de la partie partagée.
-     Ce bloc est volontairement placé EN DERNIER : plusieurs versions précédentes
-     redéfinissaient des fonctions après l'adaptateur Firebase, ce qui supprimait
-     leurs contrôles/synchronisations en ligne. On ne touche pas au moteur local. */
-  if(window.__namnetV37OnlineRepair)return;
-  window.__namnetV37OnlineRepair=true;
-
-  function onlineReady(){
-    if(state.mode!=='online')return true;
-    const uid=(()=>{try{return localStorage.getItem('namnetOnlineUid')}catch(e){return null}})();
-    const activeUid=state.onlineActiveUid||state.players?.[state.active]?.uid||null;
-    if(!uid||activeUid!==uid){toast("Ce n'est pas votre tour.");return false;}
-    /* All legacy gameplay functions operate on player 0. In shared mode the
-       local player's board is already rotated to index 0; force the legacy
-       active index to the same convention before calling the original code. */
-    state.active=0;
-    return Number(state.actions||0)>0;
-  }
-
-  function publish(){try{window.__namnetOnlinePublish?.(false)}catch(e){console.error(e)}}
-
-  /* These functions are actual gameplay actions or continuations of an action.
-     Wrapping them HERE, after every previous Vxx layer, makes the latest
-     definition authoritative without changing their local implementation. */
-  const actionNames=[
-    'discoverPlant','confirmDiscover','dryPlant',
-    'buyMaterial','buyTonicToken','useTonic','takeTonicCard',
-    'buyMarket','takeMarketCard','finishMarketBuy',
-    'sellCards','confirmSell','finishSell','closeSellWindow',
-    'selectRemedyForCreation','selectRemedyMaterial','selectRemedyPlant','confirmRemedyCreation',
-    'drawNewRemedy','chooseNewRemedyType','takeNewRemedy',
-    'playSpecialCard','playEphemeralCard','playTransactionCard',
-    'takeRarePlant','takeContraband',
-    'healLast','healWithPlants','healAllDirect','healLastDirect','useRemedyToken',
-    'usePlantTonicEffect'
-  ];
-
-  actionNames.forEach(name=>{
-    const fn=window[name];
-    if(typeof fn!=='function')return;
-    const mark='__namnetV37_'+name;
-    if(fn[mark])return;
-    function wrapped(){
-      if(state.mode==='online'&&!onlineReady())return;
-      const result=fn.apply(this,arguments);
-      if(state.mode==='online')publish();
-      return result;
-    }
-    wrapped[mark]=true;
-    window[name]=wrapped;
-  });
-
-  /* Opening the private remedy panel is deliberately NOT an action and remains
-     available exactly as in local mode. The creation/selection functions above
-     are the ones that are synchronized. */
-  const previewNames=['openRemedies'];
-  previewNames.forEach(name=>{
-    const fn=window[name];
-    if(typeof fn!=='function')return;
-    const mark='__namnetV37Preview_'+name;
-    if(fn[mark])return;
-    function wrapped(){return fn.apply(this,arguments)}
-    wrapped[mark]=true;
-    window[name]=wrapped;
-  });
-
-  /* These callbacks can be triggered from a modal opened by an already
-     authorized action. They must publish the resulting state but must not reject
-     the callback merely because the action counter has reached zero. */
-  ['applyEphemeralEffect','applyNeedleFromEphemeral','applyNeedle',
-   'takeTargetPlant','takeDriedToHand','takeDriedToRack',
-   'resolveNerveFirstAction'].forEach(name=>{
-    const fn=window[name];
-    if(typeof fn!=='function')return;
-    const mark='__namnetV37Callback_'+name;
-    if(fn[mark])return;
-    function wrapped(){
-      if(state.mode==='online'){
-        const uid=(()=>{try{return localStorage.getItem('namnetOnlineUid')}catch(e){return null}})();
-        const activeUid=state.onlineActiveUid||state.players?.[state.active]?.uid||null;
-        if(uid&&activeUid===uid)state.active=0;
-      }
-      const result=fn.apply(this,arguments);
-      if(state.mode==='online')publish();
-      return result;
-    }
-    wrapped[mark]=true;
-    window[name]=wrapped;
-  });
-
-  /* Safety net: if a later UI layer replaces one of the functions again, the
-     repair can be re-applied manually without duplicating wrappers. */
-  window.namnetRepairOnlineActions=function(){
-    actionNames.forEach(name=>{
-      const fn=window[name];if(typeof fn!=='function'||fn.__namnetV37_onlineWrapped)return;
-      const mark='__namnetV37_'+name;if(fn[mark])return;
-      function wrapped(){if(state.mode==='online'&&!onlineReady())return;const r=fn.apply(this,arguments);if(state.mode==='online')publish();return r}
-      wrapped[mark]=true;window[name]=wrapped;
-    });
-  };
-})();
-</script>
