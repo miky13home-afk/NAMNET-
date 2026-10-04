@@ -3137,7 +3137,7 @@ function dealStartingRemedies(){
   'use strict';
 
   function isOnline(){
-    return window.state && state.mode==='online';
+    return typeof state!=='undefined' && state && state.mode==='online';
   }
 
   function activeUid(){
