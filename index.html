@@ -2780,6 +2780,8 @@ function dealStartingRemedies(){
   let db=null, roomRef=null, roomCode='', onlineUid=localStorage.getItem('namnetOnlineUid');
   let onlinePlayerIndex=null, onlineHost=false, onlineApplying=false, onlineStarted=false;
   if(!onlineUid){onlineUid='p_'+Math.random().toString(36).slice(2)+Date.now().toString(36);try{localStorage.setItem('namnetOnlineUid',onlineUid)}catch(e){}}
+  /* Expose the private online UID to the final online bridge. */
+  window.__namnetOnlineUid=onlineUid;
 
   const css=`
   #onlineEntry,#onlineLobby{max-width:620px;margin:0 auto}
@@ -3137,7 +3139,7 @@ function dealStartingRemedies(){
   }
 
   function localUid(){
-    return typeof onlineUid!=='undefined' ? onlineUid : null;
+    return window.__namnetOnlineUid || null;
   }
 
   function prepareLocalView(){
