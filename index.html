@@ -3124,145 +3124,6 @@ function dealStartingRemedies(){
     };
   }
 })();</script>
-
-<script id="namnet-online-final-bridge">
-/* NAMNET — FINAL ONLINE PATH
-   This block is intentionally at the END of the document so it wraps the
-   functions that are actually effective after all older definitions.
-   Local mode is left on its original functions.
-*/
-(function(){
-  'use strict';
-
-  function isOnline(){
-    return typeof state!=='undefined' && state && state.mode==='online';
-  }
-
-  function localUid(){
-    return window.__namnetOnlineUid || null;
-  }
-
-  function prepareLocalView(){
-    if(!isOnline()) return true;
-    const uid=localUid();
-    if(!uid) return false;
-    const players=state.players||[];
-    let me=players.findIndex(p=>p&&p.uid===uid);
-    if(me<0) return false;
-
-    if(me!==0){
-      const oldPlayers=players.slice();
-      const oldZones=Array.isArray(state.zoneByPlayer)?state.zoneByPlayer.slice():null;
-      const oldActiveUid=oldPlayers[state.active]?.uid||state.onlineActiveUid||null;
-
-      state.players=oldPlayers.slice(me).concat(oldPlayers.slice(0,me));
-      state.players.forEach((p,i)=>{if(p)p.onlineIndex=p.onlineIndex??i});
-
-      if(oldZones){
-        state.zoneByPlayer=oldZones.slice(me).concat(oldZones.slice(0,me));
-      }
-
-      me=0;
-      if(oldActiveUid===uid) state.active=0;
-      else {
-        const next=state.players.findIndex(p=>p&&p.uid===oldActiveUid);
-        if(next>=0) state.active=next;
-      }
-    }
-
-    return true;
-  }
-
-  function publishSoon(){
-    if(!isOnline()) return;
-    try{
-      if(typeof window.__namnetOnlinePublish==='function'){
-        setTimeout(()=>window.__namnetOnlinePublish(false),0);
-      }
-    }catch(e){ console.error('NAMNET online publish',e); }
-  }
-
-  function wrapAction(name){
-    const original=window[name];
-    if(typeof original!=='function' || original.__namnetFinalOnline) return;
-    const wrapped=function(){
-      if(isOnline()){
-        if(!prepareLocalView()){
-          toast?.("Synchronisation du joueur impossible.");
-          return;
-        }
-        const result=original.apply(this,arguments);
-        publishSoon();
-        return result;
-      }
-      return original.apply(this,arguments);
-    };
-    wrapped.__namnetFinalOnline=true;
-    window[name]=wrapped;
-  }
-
-  [
-    'discoverPlant','confirmDiscover',
-    'buyMaterial','openShopBatch','confirmShopBatch',
-    'takeMarketCard','finishMarketBuy',
-    'sellCards','confirmSell','finishSell',
-    'openRemedies','selectRemedyForCreation','confirmRemedyCreation',
-    'playEphemeralCard','playTransactionCard','playSpecialCard',
-    'useArcane',
-    'healLast','useRemedyToken',
-    'dryPlant','buyTonicToken',
-    'drawNewRemedy','chooseNewRemedyType'
-  ].forEach(wrapAction);
-
-  /* Every completed action already goes through afterAction in the game
-     engine. Publishing here makes that completed state authoritative online. */
-  const originalAfterAction=window.afterAction;
-  if(typeof originalAfterAction==='function' && !originalAfterAction.__namnetFinalOnline){
-    const wrappedAfterAction=function(){
-      const result=originalAfterAction.apply(this,arguments);
-      if(isOnline()) publishSoon();
-      return result;
-    };
-    wrappedAfterAction.__namnetFinalOnline=true;
-    window.afterAction=wrappedAfterAction;
-  }
-
-  /* Turn passing is handled here after all older endTurn definitions have
-     loaded. Local mode keeps the original endTurn untouched. */
-  const originalEndTurn=window.endTurn;
-  if(typeof originalEndTurn==='function' && !originalEndTurn.__namnetFinalOnline){
-    const wrappedEndTurn=function(){
-      if(!isOnline()) return originalEndTurn.apply(this,arguments);
-
-      if(!prepareLocalView()){
-        toast?.("Synchronisation du joueur impossible.");
-        return;
-      }
-
-      const uid=localUid();
-      const activeUid=state.onlineActiveUid||state.players?.[state.active]?.uid||null;
-      if(activeUid!==uid){
-        toast("Ce n'est pas votre tour.");
-        return;
-      }
-
-      const result=originalEndTurn.apply(this,arguments);
-
-      if(!state.gameOver){
-        state.onlineActiveUid=state.players?.[state.active]?.uid||null;
-        if(typeof window.__namnetOnlinePublish==='function'){
-          setTimeout(()=>window.__namnetOnlinePublish(true),0);
-        }
-      }
-      return result;
-    };
-    wrappedEndTurn.__namnetFinalOnline=true;
-    window.endTurn=wrappedEndTurn;
-  }
-
-  window.__namnetFinalOnlineBridgeReady=true;
-})();
-</script>
 </body></html>
 <style id="v4-final-fixes">
 .zone-mont .zone-symptoms{left:8%!important;right:auto!important;top:12px!important;bottom:auto!important}
@@ -3973,4 +3834,83 @@ function dealStartingRemedies(){
   }
 }
 </style>
-
+<script id="namnet-online-final-bridge">
+/* NAMNET — ONLINE FINAL PATH
+   This is deliberately the LAST script in the document.
+   It wraps the functions that are actually effective after all legacy overrides.
+   Local mode is untouched.
+*/
+(function(){
+  'use strict';
+  function isOnline(){ return typeof state!=='undefined' && state && state.mode==='online'; }
+  function uid(){ return window.__namnetOnlineUid || null; }
+  function localIsTurn(){
+    if(!isOnline()) return true;
+    const me=uid();
+    const active=state.onlineActiveUid || state.players?.[state.active]?.uid || null;
+    return !!me && active===me;
+  }
+  function prepare(){
+    if(!isOnline()) return true;
+    const me=uid(); if(!me) return false;
+    const ps=state.players||[]; const mine=ps.findIndex(p=>p&&p.uid===me);
+    if(mine<0) return false;
+    if(mine!==0){
+      const old=ps.slice();
+      const oldZones=Array.isArray(state.zoneByPlayer)?state.zoneByPlayer.slice():null;
+      const oldActiveUid=state.onlineActiveUid || old[state.active]?.uid || null;
+      state.players=old.slice(mine).concat(old.slice(0,mine));
+      if(oldZones) state.zoneByPlayer=oldZones.slice(mine).concat(oldZones.slice(0,mine));
+      const ni=state.players.findIndex(p=>p&&p.uid===oldActiveUid);
+      state.active=ni>=0?ni:0;
+    }
+    if(localIsTurn()) state.active=0;
+    return true;
+  }
+  function publish(){
+    if(!isOnline() || !localIsTurn()) return;
+    try{ if(typeof window.__namnetOnlinePublish==='function') setTimeout(()=>window.__namnetOnlinePublish(false),0); }
+    catch(e){ console.error('NAMNET online publish',e); }
+  }
+  function wrap(name){
+    const original=window[name];
+    if(typeof original!=='function' || original.__namnetOnlineFinalV2) return;
+    window[name]=function(){
+      if(isOnline()){
+        if(!prepare()){ toast?.('Synchronisation du joueur impossible.'); return; }
+        if(!localIsTurn()){ toast("Ce n'est pas votre tour."); return; }
+        const r=original.apply(this,arguments); publish(); return r;
+      }
+      return original.apply(this,arguments);
+    };
+    window[name].__namnetOnlineFinalV2=true;
+  }
+  [
+    'discoverPlant','confirmDiscover',
+    'openShopBatch','changeShopQty','confirmShopBatch','buyMaterial',
+    'buyMarket','openMarketBuy','takeMarketCard','finishMarketBuy','closeMarketWindow',
+    'sellCards','confirmSell','confirmSellPair','finishSell','closeSellWindow',
+    'openRemedies','selectRemedyForCreation','confirmRemedyCreation',
+    'drawNewRemedy','chooseNewRemedyType',
+    'playSpecialCard','playSpecialEffect','playEphemeralCard','applyEphemeralEffect',
+    'applyNeedleFromEphemeral','playTransactionCard','takeContraband',
+    'useArcane','resolveArcane','dryPlant','buyTonicToken','healLast','useRemedyToken'
+  ].forEach(wrap);
+  wrap('afterAction');
+  const oldEnd=window.endTurn;
+  if(typeof oldEnd==='function' && !oldEnd.__namnetOnlineFinalV2){
+    window.endTurn=function(){
+      if(!isOnline()) return oldEnd.apply(this,arguments);
+      if(!prepare() || !localIsTurn()){ toast("Ce n'est pas votre tour."); return; }
+      const result=oldEnd.apply(this,arguments);
+      if(!state.gameOver){
+        state.onlineActiveUid=state.players?.[state.active]?.uid || state.onlineActiveUid;
+        if(typeof window.__namnetOnlinePublish==='function') setTimeout(()=>window.__namnetOnlinePublish(true),0);
+      }
+      return result;
+    };
+    window.endTurn.__namnetOnlineFinalV2=true;
+  }
+  window.__namnetOnlineFinalV2Ready=true;
+})();
+</script>
